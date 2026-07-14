@@ -5,10 +5,21 @@ from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
-from keyboards import player_controls
+from config import LOGO_PATH
+from keyboards import player_controls, welcome_menu
 from player import VoiceChatPlayer
 from queue_manager import QueueManager, Track
 from youtube import TrackNotFound, TrackTooLong, resolve_and_download
+
+COMMANDS_TEXT = (
+    "Commands:\n"
+    "/play <song name or link> -- play or queue a track\n"
+    "/skip -- skip the current track\n"
+    "/pause -- pause playback\n"
+    "/resume -- resume playback\n"
+    "/stop -- stop and leave the voice chat\n"
+    "/queue -- show the current queue"
+)
 
 
 def _format_track(track: Track, position: int | None = None) -> str:
@@ -51,12 +62,18 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
         user = message.from_user.mention if message.from_user else "there"
-        await message.reply_text(
+        caption = (
             f"Welcome {user} ,this is Musenzy a powerfull,free,music bot for you\n\n"
             "Add me to a group as admin with \"Invite users via link\" permission, start the group's "
             "voice chat, then use /play <song name or link> -- I'll bring the music assistant in "
             "automatically. Works independently in every group I'm in."
         )
+        await message.reply_photo(LOGO_PATH, caption=caption, reply_markup=welcome_menu())
+
+    @bot.on_callback_query(filters.regex(r"^menu:commands$"))
+    async def menu_cb(_client: Client, query: CallbackQuery) -> None:
+        await query.answer()
+        await query.message.reply_text(COMMANDS_TEXT)
 
     @bot.on_message(filters.command("play") & filters.group)
     async def play_cmd(client: Client, message: Message) -> None:

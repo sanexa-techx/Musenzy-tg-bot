@@ -37,3 +37,8 @@ ASSISTANT_SESSION = _optional("TELEGRAM_SESSION_STRING")
 # Optional: restrict playback duration to protect against extremely long videos.
 MAX_TRACK_SECONDS = int(os.environ.get("MAX_TRACK_SECONDS", "1200"))
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "services/telegram-music-bot/downloads")
+
+# Branding shown in the private-chat welcome message.
+LOGO_PATH = os.environ.get("LOGO_PATH", "services/telegram-music-bot/assets/logo.jpg")
+OWNER_URL = os.environ.get("OWNER_URL", "https://t.me/NONKO_0")
+SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "https://t.me/+-uT8Owz9aKg5N2M1")
