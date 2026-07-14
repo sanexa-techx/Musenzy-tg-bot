@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pyrogram import Client, filters
+from pyrogram.errors import UserAlreadyParticipant
 from pyrogram.types import CallbackQuery, Message
 
 from keyboards import player_controls
@@ -18,12 +19,49 @@ def _format_track(track: Track, position: int | None = None) -> str:
     return f"Queued at #{position}: {track.title} ({duration})\nRequested by {track.requested_by}"
 
 
-def register_handlers(bot: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
+def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
         await message.reply_text(
-            "Add me to a group, start the group's voice chat, then use /play <song name or link> "
-            "to queue music. Works independently in every group I'm in."
+            "Add me to a group as admin, run /connect to bring the music assistant in, "
+            "start the group's voice chat, then use /play <song name or link> to queue music. "
+            "Works independently in every group I'm in."
+        )
+
+    @bot.on_message(filters.command("connect") & filters.group)
+    async def connect_cmd(client: Client, message: Message) -> None:
+        chat_id = message.chat.id
+
+        me = await client.get_chat_member(chat_id, "me")
+        if not me.privileges or not me.privileges.can_invite_users:
+            await message.reply_text(
+                "I need to be an admin here with \"Invite users via link\" permission before I can bring "
+                "the music assistant in."
+            )
+            return
+
+        if message.from_user:
+            requester = await client.get_chat_member(chat_id, message.from_user.id)
+            is_admin = requester.status in ("administrator", "creator")
+            if not is_admin:
+                await message.reply_text("Only group admins can run /connect.")
+                return
+
+        status = await message.reply_text("Generating an invite link and bringing the music assistant in...")
+        try:
+            link = await client.create_chat_invite_link(chat_id, member_limit=1)
+            await assistant.join_chat(link.invite_link)
+        except UserAlreadyParticipant:
+            await status.edit_text("The music assistant is already in this group. Start the voice chat and use /play.")
+            return
+        except Exception:
+            await status.edit_text(
+                "Couldn't join this group. Make sure I have permission to invite users, then try /connect again."
+            )
+            raise
+
+        await status.edit_text(
+            "Connected! Start the group's voice chat, then use /play <song name or link> to queue music."
         )
 
     @bot.on_message(filters.command("play") & filters.group)

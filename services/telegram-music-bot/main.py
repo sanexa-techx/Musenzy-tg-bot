@@ -30,7 +30,7 @@ async def run() -> None:
     queues = QueueManager()
     player = VoiceChatPlayer(calls, queues)
 
-    register_handlers(bot, player, queues)
+    register_handlers(bot, assistant, player, queues)
 
     await assistant.start()
     await calls.start()
