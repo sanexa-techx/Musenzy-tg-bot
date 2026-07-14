@@ -1,0 +1,1 @@
+- [Telegram voice-chat music bots (py-tgcalls)](telegram-voice-bot.md) — use pyrofork not pyrogram; generate MTProto session strings via a workflow, not ShellExec background/nohup.

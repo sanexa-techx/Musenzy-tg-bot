@@ -5,7 +5,7 @@ import logging
 
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream, Update
-from pytgcalls.types.stream import StreamAudioEnded
+from pytgcalls.types.stream import StreamEnded
 
 from queue_manager import QueueManager, Track
 from youtube import cleanup_file
@@ -23,7 +23,7 @@ class VoiceChatPlayer:
         self.calls.on_update(self._on_stream_end)
 
     async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
-        if not isinstance(update, StreamAudioEnded):
+        if not isinstance(update, StreamEnded):
             return
         chat_id = update.chat_id
         current = self.queues.state(chat_id).current
