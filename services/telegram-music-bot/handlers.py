@@ -52,14 +52,13 @@ _SEARCH_EMOJIS = ["🦋", "🕊️", "👾"]
 
 
 async def _animate_searching(status: Message, query: str) -> None:
-    """Cycle the status message through a small emoji animation while the
-    track is being resolved and downloaded."""
+    """Cycle the status message through a small emoji-only animation while
+    the track is being resolved and downloaded."""
     i = 0
     while True:
         emoji = _SEARCH_EMOJIS[i % len(_SEARCH_EMOJIS)]
-        frame = f"{emoji} Searching for \"{query}\""
         with contextlib.suppress(Exception):
-            await status.edit_text(frame)
+            await status.edit_text(emoji)
         i += 1
         await asyncio.sleep(1)
 
