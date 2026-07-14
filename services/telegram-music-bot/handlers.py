@@ -1,6 +1,9 @@
 """Command and callback handlers for the music bot."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
@@ -22,12 +25,43 @@ COMMANDS_TEXT = (
 )
 
 
+def _format_duration(seconds: int) -> str:
+    if not seconds:
+        return "Live"
+    hours, rem = divmod(seconds, 3600)
+    mins, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+
 def _format_track(track: Track, position: int | None = None) -> str:
-    mins, secs = divmod(track.duration, 60)
-    duration = f"{mins}:{secs:02d}" if track.duration else "live"
+    duration = _format_duration(track.duration)
     if position is None:
-        return f"Now playing: {track.title} ({duration})\nRequested by {track.requested_by}"
-    return f"Queued at #{position}: {track.title} ({duration})\nRequested by {track.requested_by}"
+        return f"🎶 Now playing: {track.title}\n⏱ Duration: {duration}\n👤 Requested by: {track.requested_by}"
+    return (
+        f"➕ Queued at #{position}: {track.title}\n⏱ Duration: {duration}\n👤 Requested by: {track.requested_by}"
+    )
+
+
+_SEARCH_FRAMES = [
+    "🔍 Searching for \"{query}\"",
+    "🔍 Searching for \"{query}\".",
+    "🔍 Searching for \"{query}\"..",
+    "🔍 Searching for \"{query}\"...",
+]
+
+
+async def _animate_searching(status: Message, query: str) -> None:
+    """Cycle the status message through a small dot animation while the
+    track is being resolved and downloaded."""
+    i = 0
+    while True:
+        frame = _SEARCH_FRAMES[i % len(_SEARCH_FRAMES)].format(query=query)
+        with contextlib.suppress(Exception):
+            await status.edit_text(frame)
+        i += 1
+        await asyncio.sleep(1)
 
 
 async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: int) -> str | None:
@@ -87,7 +121,8 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             await message.reply_text(join_error)
             return
 
-        status = await message.reply_text(f"Searching for \"{query[1]}\"...")
+        status = await message.reply_text(f"🔍 Searching for \"{query[1]}\"")
+        anim_task = asyncio.create_task(_animate_searching(status, query[1]))
         try:
             info = await resolve_and_download(query[1])
         except TrackTooLong as exc:
@@ -99,6 +134,10 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         except Exception:
             await status.edit_text("Something went wrong fetching that track. Try again.")
             raise
+        finally:
+            anim_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await anim_task
 
         requester = message.from_user.mention if message.from_user else "someone"
         track = Track(
