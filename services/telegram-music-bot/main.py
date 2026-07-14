@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from pyrogram import Client
+from pyrogram.types import BotCommand
 from pytgcalls import PyTgCalls
 
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN
@@ -35,6 +36,15 @@ async def run() -> None:
     await assistant.start()
     await calls.start()
     await bot.start()
+    await bot.set_bot_commands([
+        BotCommand("start", "Show welcome message and instructions"),
+        BotCommand("play", "Play a song by name or YouTube link"),
+        BotCommand("skip", "Skip the current track"),
+        BotCommand("pause", "Pause playback"),
+        BotCommand("resume", "Resume playback"),
+        BotCommand("stop", "Stop and leave the voice chat"),
+        BotCommand("queue", "Show the current queue"),
+    ])
 
     log.info("Bot and assistant are online. Multi-group voice chat music is ready.")
 

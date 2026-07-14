@@ -50,7 +50,9 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
 def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
+        user = message.from_user.mention if message.from_user else "there"
         await message.reply_text(
+            f"Welcome {user} ,this is Musenzy a powerfull,free,music bot for you\n\n"
             "Add me to a group as admin with \"Invite users via link\" permission, start the group's "
             "voice chat, then use /play <song name or link> -- I'll bring the music assistant in "
             "automatically. Works independently in every group I'm in."
