@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Awaitable, Callable, Optional
 
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream, Update
@@ -21,6 +22,10 @@ class VoiceChatPlayer:
         self.calls = calls
         self.queues = queues
         self.calls.on_update(self._on_stream_end)
+        # Notified whenever a track actually starts streaming (initial /play
+        # and every automatic/manual advance), so the chat layer can post a
+        # fresh now-playing message with a live progress bar.
+        self.on_track_start: Optional[Callable[[int, Track], Awaitable[None]]] = None
 
     async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
         if not isinstance(update, StreamEnded):
@@ -45,6 +50,8 @@ class VoiceChatPlayer:
         except Exception:
             log.exception("Failed to join/play voice chat for %s", chat_id)
             raise
+        if self.on_track_start:
+            await self.on_track_start(chat_id, track)
 
     async def play_next(self, chat_id: int) -> Track | None:
         nxt = self.queues.next_track(chat_id)

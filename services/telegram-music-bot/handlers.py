@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
@@ -11,8 +12,11 @@ from pyrogram.types import CallbackQuery, Message
 from config import LOGO_PATH
 from keyboards import player_controls, welcome_menu
 from player import VoiceChatPlayer
+from progress import NowPlayingTracker, render_bar
 from queue_manager import QueueManager, Track
 from youtube import TrackNotFound, TrackTooLong, resolve_and_download
+
+log = logging.getLogger("handlers")
 
 COMMANDS_TEXT = (
     "Commands:\n"
@@ -93,6 +97,32 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
 
 
 def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
+    tracker = NowPlayingTracker()
+
+    def _controls(chat_id: int):
+        return player_controls(paused=queues.state(chat_id).paused)
+
+    async def _post_now_playing(chat_id: int, track: Track) -> None:
+        """Sends a fresh "now playing" message and starts its live progress
+        bar. Fires on every track start -- the initial /play, /skip, button
+        skips, and automatic advance when a track finishes."""
+        caption = _format_track(track)
+        bar = render_bar(0, track.duration, paused=False)
+        text = f"{caption}\n\n{bar}"
+        try:
+            if track.thumbnail:
+                message = await bot.send_photo(
+                    chat_id, track.thumbnail, caption=text, reply_markup=_controls(chat_id)
+                )
+            else:
+                message = await bot.send_message(chat_id, text, reply_markup=_controls(chat_id))
+        except Exception:
+            log.exception("Failed to post now-playing message for chat %s", chat_id)
+            return
+        tracker.start(chat_id, message, track.duration, caption, lambda cid=chat_id: _controls(cid))
+
+    player.on_track_start = _post_now_playing
+
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
         user = message.from_user.mention if message.from_user else "there"
@@ -151,37 +181,41 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         )
 
         position = await player.play_or_enqueue(message.chat.id, track)
-        text = _format_track(track, position if position else None)
-        if track.thumbnail:
+        if position == 0:
+            # The on_track_start callback already posted the live now-playing
+            # message with its progress bar -- just clear the search status.
             await status.delete()
-            await message.reply_photo(
-                track.thumbnail,
-                caption=text,
-                reply_markup=player_controls(paused=False) if position == 0 else None,
-            )
         else:
-            await status.edit_text(text, reply_markup=player_controls(paused=False) if position == 0 else None)
+            text = _format_track(track, position)
+            if track.thumbnail:
+                await status.delete()
+                await message.reply_photo(track.thumbnail, caption=text)
+            else:
+                await status.edit_text(text)
 
     @bot.on_message(filters.command("skip") & filters.group)
     async def skip_cmd(_client: Client, message: Message) -> None:
         nxt = await player.play_next(message.chat.id)
         if nxt:
-            await message.reply_text(f"Skipped. {_format_track(nxt)}", reply_markup=player_controls(paused=False))
+            await message.reply_text("⏭ Skipped.")
         else:
             await message.reply_text("Skipped. Queue is empty, leaving the voice chat.")
 
     @bot.on_message(filters.command("pause") & filters.group)
     async def pause_cmd(_client: Client, message: Message) -> None:
         await player.pause(message.chat.id)
-        await message.reply_text("Paused.", reply_markup=player_controls(paused=True))
+        tracker.pause(message.chat.id)
+        await message.reply_text("⏸ Paused.")
 
     @bot.on_message(filters.command("resume") & filters.group)
     async def resume_cmd(_client: Client, message: Message) -> None:
         await player.resume(message.chat.id)
-        await message.reply_text("Resumed.", reply_markup=player_controls(paused=False))
+        tracker.resume(message.chat.id)
+        await message.reply_text("▶️ Resumed.")
 
     @bot.on_message(filters.command("stop") & filters.group)
     async def stop_cmd(_client: Client, message: Message) -> None:
+        tracker.stop(message.chat.id)
         await player.stop(message.chat.id)
         await message.reply_text("Stopped and left the voice chat.")
 
@@ -205,20 +239,21 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         if action == "pauseresume":
             if state.paused:
                 await player.resume(chat_id)
+                tracker.resume(chat_id)
                 await query.answer("Resumed")
             else:
                 await player.pause(chat_id)
+                tracker.pause(chat_id)
                 await query.answer("Paused")
             if query.message.reply_markup:
-                await query.message.edit_reply_markup(player_controls(paused=not state.paused))
+                await query.message.edit_reply_markup(player_controls(paused=state.paused))
         elif action == "skip":
             nxt = await player.play_next(chat_id)
             await query.answer("Skipped")
-            if nxt:
-                await query.message.reply_text(_format_track(nxt), reply_markup=player_controls(paused=False))
-            else:
+            if not nxt:
                 await query.message.reply_text("Queue is empty, leaving the voice chat.")
         elif action == "stop":
+            tracker.stop(chat_id)
             await player.stop(chat_id)
             await query.answer("Stopped")
             await query.message.reply_text("Stopped and left the voice chat.")
