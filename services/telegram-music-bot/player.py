@@ -1,0 +1,78 @@
+"""Wraps py-tgcalls to join/stream/leave group voice chats per group."""
+from __future__ import annotations
+
+import logging
+
+from pytgcalls import PyTgCalls
+from pytgcalls.types import MediaStream, Update
+from pytgcalls.types.stream import StreamAudioEnded
+
+from queue_manager import QueueManager, Track
+from youtube import cleanup_file
+
+log = logging.getLogger("player")
+
+
+class VoiceChatPlayer:
+    """Owns the single PyTgCalls instance (bound to the assistant account) and
+    coordinates per-chat queues so multiple groups can play independently."""
+
+    def __init__(self, calls: PyTgCalls, queues: QueueManager) -> None:
+        self.calls = calls
+        self.queues = queues
+        self.calls.on_update(self._on_stream_end)
+
+    async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
+        if not isinstance(update, StreamAudioEnded):
+            return
+        chat_id = update.chat_id
+        current = self.queues.state(chat_id).current
+        if current:
+            cleanup_file(current.file_path)
+        await self.play_next(chat_id)
+
+    async def play_or_enqueue(self, chat_id: int, track: Track) -> int:
+        position = self.queues.enqueue(chat_id, track)
+        if position == 0:
+            await self._start(chat_id, track)
+        return position
+
+    async def _start(self, chat_id: int, track: Track) -> None:
+        state = self.queues.state(chat_id)
+        state.paused = False
+        try:
+            await self.calls.play(chat_id, MediaStream(track.file_path))
+        except Exception:
+            log.exception("Failed to join/play voice chat for %s", chat_id)
+            raise
+
+    async def play_next(self, chat_id: int) -> Track | None:
+        nxt = self.queues.next_track(chat_id)
+        if nxt is None:
+            try:
+                await self.calls.leave_call(chat_id)
+            except Exception:
+                pass
+            return None
+        await self._start(chat_id, nxt)
+        return nxt
+
+    async def pause(self, chat_id: int) -> None:
+        await self.calls.pause_stream(chat_id)
+        self.queues.state(chat_id).paused = True
+
+    async def resume(self, chat_id: int) -> None:
+        await self.calls.resume_stream(chat_id)
+        self.queues.state(chat_id).paused = False
+
+    async def stop(self, chat_id: int) -> None:
+        current = self.queues.state(chat_id).current
+        if current:
+            cleanup_file(current.file_path)
+        for track in self.queues.state(chat_id).queue:
+            cleanup_file(track.file_path)
+        self.queues.clear(chat_id)
+        try:
+            await self.calls.leave_call(chat_id)
+        except Exception:
+            pass

@@ -47,3 +47,14 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python
+.pythonlibs/
+__pycache__/
+*.pyc
+uv.lock
+
+# Telegram bot session cache & downloaded audio
+services/telegram-music-bot/downloads/
+*.session
+*.session-journal
