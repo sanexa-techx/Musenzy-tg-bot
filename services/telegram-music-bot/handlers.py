@@ -48,20 +48,16 @@ def _format_track(track: Track, position: int | None = None) -> str:
     )
 
 
-_SEARCH_FRAMES = [
-    "🔍 Searching for \"{query}\"",
-    "🔍 Searching for \"{query}\".",
-    "🔍 Searching for \"{query}\"..",
-    "🔍 Searching for \"{query}\"...",
-]
+_SEARCH_EMOJIS = ["🦋", "🕊️", "👾"]
 
 
 async def _animate_searching(status: Message, query: str) -> None:
-    """Cycle the status message through a small dot animation while the
+    """Cycle the status message through a small emoji animation while the
     track is being resolved and downloaded."""
     i = 0
     while True:
-        frame = _SEARCH_FRAMES[i % len(_SEARCH_FRAMES)].format(query=query)
+        emoji = _SEARCH_EMOJIS[i % len(_SEARCH_EMOJIS)]
+        frame = f"{emoji} Searching for \"{query}\""
         with contextlib.suppress(Exception):
             await status.edit_text(frame)
         i += 1
