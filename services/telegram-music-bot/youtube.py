@@ -11,6 +11,15 @@ from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+_EXTRACTOR_ARGS = {
+    # The default "web" client increasingly demands sign-in/PO-token
+    # verification from cloud IPs. The android/ios/tv embedded clients don't
+    # require that for public videos.
+    "youtube": {
+        "player_client": ["android", "ios", "tv"],
+    }
+}
+
 _SEARCH_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -18,6 +27,7 @@ _SEARCH_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
+    "extractor_args": _EXTRACTOR_ARGS,
 }
 
 _DOWNLOAD_OPTS = {
@@ -25,6 +35,7 @@ _DOWNLOAD_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    "extractor_args": _EXTRACTOR_ARGS,
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",

@@ -6,7 +6,8 @@ description: Dependency and process gotchas when building a Telegram bot that jo
 - Telegram's Bot API cannot join or stream into a group voice chat. Only a real user account (MTProto client) can. Architecture needs two Telegram clients: a bot (BotFather token) for commands/buttons, and an "assistant" user account (session string) that actually joins/streams.
 - `py-tgcalls`'s pyrogram backend imports error classes (e.g. `GroupcallForbidden`) that do not exist in mainline PyPI `pyrogram`. Install `pyrofork` instead — it's a maintained fork that installs into the same `pyrogram` import namespace (drop-in, no import changes) and has the classes py-tgcalls expects. Do not pip-install `pyrogram` and `pyrofork` together; uninstall one before installing the other since both occupy the `pyrogram` module path.
 - `py-tgcalls`'s client-type detection (`BridgedClient.package_name`) only recognizes modules literally named `pyrogram` or `telethon` — `hydrogram` is not detected and raises `InvalidMTProtoClient` even though its API is pyrogram-compatible.
-- **Why:** discovered by trial — hydrogram failed silently on backend detection; pyrogram (mainline) failed on missing error class at PyTgCalls init.
+- yt-dlp's default "web" YouTube client increasingly triggers "Sign in to confirm you're not a bot" from cloud/datacenter IPs (like Replit's). Fix: pass `extractor_args: {"youtube": {"player_client": ["android", "ios", "tv"]}}` to yt-dlp options for both search and download — these embedded clients don't require the same sign-in/PO-token verification for public videos.
+- **Why:** discovered by trial — hydrogram failed silently on backend detection; pyrogram (mainline) failed on missing error class at PyTgCalls init; default yt-dlp client got blocked by YouTube's bot detection on the cloud IP.
 
 ## Generating a session string interactively
 
