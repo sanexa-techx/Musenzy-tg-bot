@@ -42,11 +42,11 @@ def _state_path(phone: str) -> str:
 
 def _session_name(phone: str) -> str:
     safe = phone.replace("+", "").replace(" ", "")
-    return os.path.join(STATE_DIR, f"session_{safe}")
+    return f"session_{safe}"
 
 
 async def send(phone: str) -> None:
-    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH)
+    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH, workdir=os.path.abspath(STATE_DIR))
     await client.connect()
     sent = await client.send_code(phone)
     with open(_state_path(phone), "w") as f:
@@ -59,7 +59,7 @@ async def signin(phone: str, code: str) -> None:
     with open(_state_path(phone)) as f:
         state = json.load(f)
 
-    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH)
+    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH, workdir=os.path.abspath(STATE_DIR))
     await client.connect()
     try:
         await client.sign_in(phone, state["phone_code_hash"], code)
@@ -74,7 +74,7 @@ async def signin(phone: str, code: str) -> None:
 
 
 async def twofa(phone: str, password: str) -> None:
-    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH)
+    client = Client(_session_name(phone), api_id=API_ID, api_hash=API_HASH, workdir=os.path.abspath(STATE_DIR))
     await client.connect()
     await client.check_password(password)
     session_string = await client.export_session_string()

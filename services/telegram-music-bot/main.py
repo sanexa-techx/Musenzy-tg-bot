@@ -16,6 +16,14 @@ log = logging.getLogger("main")
 
 
 async def run() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN. Set it in Replit Secrets before starting the bot.")
+    if not ASSISTANT_SESSION:
+        raise RuntimeError(
+            "Missing TELEGRAM_SESSION_STRING. Generate it with "
+            "services/telegram-music-bot/generate_session.py, then set it in Replit Secrets."
+        )
+
     bot = Client("music_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
     assistant = Client("music_assistant", api_id=API_ID, api_hash=API_HASH, session_string=ASSISTANT_SESSION, in_memory=True)
     calls = PyTgCalls(assistant)
