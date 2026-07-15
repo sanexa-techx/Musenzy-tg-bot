@@ -13,10 +13,11 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 _EXTRACTOR_ARGS = {
     # The default "web" client increasingly demands sign-in/PO-token
-    # verification from cloud IPs. The android/ios/tv embedded clients don't
-    # require that for public videos.
+    # verification from cloud IPs. "tv_simply" and "tv" don't require a PO
+    # token for public videos; keep ios/android as fallbacks.
     "youtube": {
-        "player_client": ["android", "ios", "tv"],
+        "player_client": ["tv_simply", "tv", "ios", "android"],
+        "player_skip": ["webpage", "configs"],
     }
 }
 
