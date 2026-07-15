@@ -19,44 +19,37 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # back to anonymous clients, which may get blocked.
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-_EXTRACTOR_ARGS = {
-    # The default "web" client increasingly demands sign-in/PO-token
-    # verification from cloud IPs. "tv_embedded" and "tv" avoid that
-    # requirement for public videos; ios/android are reliable fallbacks.
-    # Do NOT add player_skip here — skipping "webpage"/"configs" causes
-    # yt-dlp to miss available formats and raise "Requested format is not
-    # available" for videos the tv clients expose with limited format lists.
-    # If YouTube still blocks even with cookies, remove tv_embedded/tv and
-    # rely solely on ios/android which always include audio-only streams.
-    "youtube": {
-        "player_client": ["tv_embedded", "tv", "ios", "android"],
-    }
-}
-
-
-def _base_opts() -> dict:
-    opts = {"extractor_args": _EXTRACTOR_ARGS}
-    if os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
-    return opts
-
+# No extractor_args and no cookiefile.
+#
+# yt-dlp in this environment has no JavaScript runtime available (EJS
+# requirement), so DASH/adaptive formats that need signature solving are
+# unavailable. However, format 18 (mp4 360p, combined audio+video, legacy
+# YouTube stream) does NOT require JS solving and is reliably available for
+# public videos via the default web client without cookies.
+#
+# Passing cookies causes yt-dlp to skip the ios client (which it would use
+# as a fallback) and forces web clients that then need JS solving.
+# Not passing cookies lets yt-dlp pick format 18 freely.
+#
+# _FORMAT: prefer audio-only streams first; fall back to best mp4 combined
+# (format 18), then anything. ffmpeg's FFmpegExtractAudio postprocessor
+# strips the audio track from combined formats transparently.
+_FORMAT = "bestaudio/best[ext=mp4]/best"
 
 _SEARCH_OPTS = {
-    "format": "bestaudio/best",
+    "format": _FORMAT,
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    **_base_opts(),
 }
 
 _DOWNLOAD_OPTS = {
-    "format": "bestaudio/best",
+    "format": _FORMAT,
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    **_base_opts(),
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",
