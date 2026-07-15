@@ -21,10 +21,12 @@ COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
 _EXTRACTOR_ARGS = {
     # The default "web" client increasingly demands sign-in/PO-token
-    # verification from cloud IPs. "tv_simply" and "tv" don't require a PO
-    # token for public videos; keep ios/android as fallbacks.
+    # verification from cloud IPs. "tv_embedded" and "tv" avoid that
+    # requirement for public videos; ios/android/mediaconnect are fallbacks.
+    # If YouTube still blocks, drop a cookies.txt (see COOKIES_FILE) from a
+    # logged-in browser account -- the code picks it up automatically.
     "youtube": {
-        "player_client": ["tv_simply", "tv", "ios", "android"],
+        "player_client": ["tv_embedded", "tv", "ios", "android", "mediaconnect"],
         "player_skip": ["webpage", "configs"],
     }
 }
