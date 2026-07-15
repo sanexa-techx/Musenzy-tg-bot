@@ -20,10 +20,10 @@ def player_controls(paused: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("▶️ Resume" if paused else "⏸ Pause", callback_data="ctl:pauseresume"),
-                InlineKeyboardButton("⏭ Skip", callback_data="ctl:skip"),
-                InlineKeyboardButton("⏹ Stop", callback_data="ctl:stop"),
-                InlineKeyboardButton("📜 Queue", callback_data="ctl:queue"),
+                InlineKeyboardButton("▶️" if paused else "⏸", callback_data="ctl:pauseresume"),
+                InlineKeyboardButton("⏭", callback_data="ctl:skip"),
+                InlineKeyboardButton("⏹", callback_data="ctl:stop"),
+                InlineKeyboardButton("📜", callback_data="ctl:queue"),
             ],
         ]
     )
