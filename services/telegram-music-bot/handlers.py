@@ -6,7 +6,7 @@ import contextlib
 import logging
 
 from pyrogram import Client, filters
-from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
+from pyrogram.errors import FloodWait, UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
 from config import LOGO_PATH
@@ -56,11 +56,13 @@ async def _animate_searching(status: Message, query: str) -> None:
     the track is being resolved and downloaded."""
     i = 0
     while True:
+        # Sleep first — the initial "Searching..." text is already visible.
+        # 5 s between edits keeps us well under Telegram's EditMessage flood limit.
+        await asyncio.sleep(5)
         emoji = _SEARCH_EMOJIS[i % len(_SEARCH_EMOJIS)]
         with contextlib.suppress(Exception):
             await status.edit_text(emoji)
         i += 1
-        await asyncio.sleep(1)
 
 
 async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: int) -> str | None:
@@ -106,9 +108,15 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         text = f"{caption}\n\n{bar}"
         try:
             if track.thumbnail:
-                message = await bot.send_photo(
-                    chat_id, track.thumbnail, caption=text, reply_markup=_controls(chat_id)
-                )
+                try:
+                    message = await bot.send_photo(
+                        chat_id, track.thumbnail, caption=text, reply_markup=_controls(chat_id)
+                    )
+                except FloodWait as e:
+                    log.warning("FloodWait %ds on send_photo for chat %s — falling back to text", e.value, chat_id)
+                    await asyncio.sleep(min(e.value, 10))
+                    # Fall back to a text-only message so the user always gets a response.
+                    message = await bot.send_message(chat_id, text, reply_markup=_controls(chat_id))
             else:
                 message = await bot.send_message(chat_id, text, reply_markup=_controls(chat_id))
         except Exception:
