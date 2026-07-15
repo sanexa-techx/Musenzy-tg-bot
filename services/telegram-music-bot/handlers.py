@@ -48,6 +48,17 @@ def _format_track(track: Track, position: int | None = None) -> str:
     )
 
 
+async def _send_and_delete(chat_id: int, bot: Client, text: str, delay: int = 8) -> None:
+    """Send a temporary message and delete it after `delay` seconds."""
+    try:
+        msg = await bot.send_message(chat_id, text)
+        await asyncio.sleep(delay)
+        with contextlib.suppress(Exception):
+            await msg.delete()
+    except Exception:
+        pass
+
+
 _SEARCH_EMOJIS = ["🦋", "🕊️", "👾"]
 
 
@@ -171,36 +182,43 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             _seen_message_ids.discard(next(iter(_seen_message_ids)))
 
         query = message.text.split(maxsplit=1)
+        chat_id = message.chat.id
         if len(query) < 2:
-            await message.reply_text("Usage: /play <song name or YouTube link>")
+            asyncio.create_task(_send_and_delete(chat_id, bot, "Usage: /play <song name or YouTube link>"))
+            with contextlib.suppress(Exception):
+                await message.delete()
             return
 
-        join_error = await _ensure_assistant_in_chat(client, assistant, message.chat.id)
+        join_error = await _ensure_assistant_in_chat(client, assistant, chat_id)
         if join_error:
-            await message.reply_text(join_error)
+            asyncio.create_task(_send_and_delete(chat_id, bot, join_error))
+            with contextlib.suppress(Exception):
+                await message.delete()
             return
 
         # Per-chat lock: only one download at a time per group.
-        lock = _chat_locks.setdefault(message.chat.id, asyncio.Lock())
+        lock = _chat_locks.setdefault(chat_id, asyncio.Lock())
         if lock.locked():
-            await message.reply_text("⏳ Already fetching a track — please wait.")
+            # Silently discard — a download is already in progress.
+            with contextlib.suppress(Exception):
+                await message.delete()
             return
 
         async with lock:
-            # Delete the /play command immediately — no intermediate status message.
+            # Delete the /play command immediately — no intermediate messages.
             with contextlib.suppress(Exception):
                 await message.delete()
 
             try:
                 info = await resolve_and_download(query[1])
             except TrackTooLong as exc:
-                await message.reply_text(str(exc))
+                asyncio.create_task(_send_and_delete(chat_id, bot, str(exc)))
                 return
             except TrackNotFound:
-                await message.reply_text("❌ Couldn't find that track. Try a different search.")
+                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that track."))
                 return
             except Exception:
-                await message.reply_text("❌ Something went wrong fetching that track. Try again.")
+                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Something went wrong fetching that track."))
                 raise
 
             requester = message.from_user.mention if message.from_user else "someone"
