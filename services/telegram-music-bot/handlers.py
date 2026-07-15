@@ -116,7 +116,15 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             return
         tracker.start(chat_id, message, track.duration, caption, lambda cid=chat_id: _controls(cid))
 
+    async def _post_queue_empty(chat_id: int) -> None:
+        """Fires once the queue runs out and the assistant has left the
+        voice chat -- stops the progress tracker and lets everyone know."""
+        tracker.stop(chat_id)
+        with contextlib.suppress(Exception):
+            await bot.send_message(chat_id, "✅ Queue finished, left the voice chat.")
+
     player.on_track_start = _post_now_playing
+    player.on_queue_empty = _post_queue_empty
 
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
@@ -193,8 +201,6 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         nxt = await player.play_next(message.chat.id)
         if nxt:
             await message.reply_text("⏭ Skipped.")
-        else:
-            await message.reply_text("Skipped. Queue is empty, leaving the voice chat.")
 
     @bot.on_message(filters.command("pause") & filters.group)
     async def pause_cmd(_client: Client, message: Message) -> None:
@@ -243,10 +249,8 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             if query.message.reply_markup:
                 await query.message.edit_reply_markup(player_controls(paused=state.paused))
         elif action == "skip":
-            nxt = await player.play_next(chat_id)
+            await player.play_next(chat_id)
             await query.answer("Skipped")
-            if not nxt:
-                await query.message.reply_text("Queue is empty, leaving the voice chat.")
         elif action == "stop":
             tracker.stop(chat_id)
             await player.stop(chat_id)

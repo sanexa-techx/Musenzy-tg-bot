@@ -26,6 +26,11 @@ class VoiceChatPlayer:
         # and every automatic/manual advance), so the chat layer can post a
         # fresh now-playing message with a live progress bar.
         self.on_track_start: Optional[Callable[[int, Track], Awaitable[None]]] = None
+        # Notified once the queue runs out and the assistant leaves the
+        # voice chat -- covers natural end-of-queue, /skip, and the skip
+        # button, so the chat layer can stop the progress tracker and post
+        # a single "leaving" message from one place.
+        self.on_queue_empty: Optional[Callable[[int], Awaitable[None]]] = None
 
     async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
         if not isinstance(update, StreamEnded):
@@ -60,6 +65,8 @@ class VoiceChatPlayer:
                 await self.calls.leave_call(chat_id)
             except Exception:
                 pass
+            if self.on_queue_empty:
+                await self.on_queue_empty(chat_id)
             return None
         await self._start(chat_id, nxt)
         return nxt
