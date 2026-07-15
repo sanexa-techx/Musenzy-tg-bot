@@ -6,7 +6,7 @@ import contextlib
 import logging
 
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, UserAlreadyParticipant, UserNotParticipant
+from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
 from config import LOGO_PATH
@@ -72,7 +72,9 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
     try:
         await assistant.get_chat_member(chat_id, "me")
         return None
-    except UserNotParticipant:
+    except (UserNotParticipant, ChannelInvalid, ChannelPrivate):
+        # ChannelInvalid / ChannelPrivate fires when the assistant has never
+        # seen this chat before — treat it the same as not being a member.
         pass
 
     me = await client.get_chat_member(chat_id, "me")
