@@ -22,12 +22,14 @@ COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 _EXTRACTOR_ARGS = {
     # The default "web" client increasingly demands sign-in/PO-token
     # verification from cloud IPs. "tv_embedded" and "tv" avoid that
-    # requirement for public videos; ios/android/mediaconnect are fallbacks.
-    # If YouTube still blocks, drop a cookies.txt (see COOKIES_FILE) from a
-    # logged-in browser account -- the code picks it up automatically.
+    # requirement for public videos; ios/android are reliable fallbacks.
+    # Do NOT add player_skip here — skipping "webpage"/"configs" causes
+    # yt-dlp to miss available formats and raise "Requested format is not
+    # available" for videos the tv clients expose with limited format lists.
+    # If YouTube still blocks even with cookies, remove tv_embedded/tv and
+    # rely solely on ios/android which always include audio-only streams.
     "youtube": {
-        "player_client": ["tv_embedded", "tv", "ios", "android", "mediaconnect"],
-        "player_skip": ["webpage", "configs"],
+        "player_client": ["tv_embedded", "tv", "ios", "android"],
     }
 }
 
