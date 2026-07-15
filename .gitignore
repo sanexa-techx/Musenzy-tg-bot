@@ -58,3 +58,6 @@ uv.lock
 services/telegram-music-bot/downloads/
 *.session
 *.session-journal
+
+# Local YouTube auth cookies (never commit real credentials)
+services/telegram-music-bot/cookies.txt

@@ -11,6 +11,14 @@ from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# When YouTube's bot-check blocks every anonymous client from this
+# environment's IP (message: "Sign in to confirm you're not a bot"), the
+# only reliable fix is authenticating with real browser cookies exported
+# from a logged-in YouTube account (Netscape cookies.txt format). Drop that
+# file at COOKIES_FILE and it's picked up automatically; without it we fall
+# back to anonymous clients, which may get blocked.
+COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
 _EXTRACTOR_ARGS = {
     # The default "web" client increasingly demands sign-in/PO-token
     # verification from cloud IPs. "tv_simply" and "tv" don't require a PO
@@ -21,6 +29,14 @@ _EXTRACTOR_ARGS = {
     }
 }
 
+
+def _base_opts() -> dict:
+    opts = {"extractor_args": _EXTRACTOR_ARGS}
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
+
+
 _SEARCH_OPTS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -28,7 +44,7 @@ _SEARCH_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
-    "extractor_args": _EXTRACTOR_ARGS,
+    **_base_opts(),
 }
 
 _DOWNLOAD_OPTS = {
@@ -36,7 +52,7 @@ _DOWNLOAD_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "extractor_args": _EXTRACTOR_ARGS,
+    **_base_opts(),
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",
