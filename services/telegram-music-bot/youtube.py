@@ -94,25 +94,43 @@ def _download_sync(video_url: str, out_id: str) -> str:
 
 async def resolve_and_download(query: str) -> dict:
     """Search YouTube for `query` (or accept a direct URL), download the audio,
-    and return track metadata including the local file path to stream."""
+    and return track metadata including the local file path to stream.
+
+    Retries up to 2 times on transient errors (e.g. bun cold-start, JS
+    challenge flakiness). TrackNotFound and TrackTooLong are not retried.
+    """
     loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(None, _extract_info_sync, query)
+    last_exc: Exception | None = None
 
-    duration = int(info.get("duration") or 0)
-    if duration and duration > MAX_TRACK_SECONDS:
-        raise TrackTooLong(f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit")
+    for attempt in range(3):
+        if attempt:
+            # Brief pause before retry so bun/yt-dlp can settle.
+            await asyncio.sleep(2)
+        try:
+            info = await loop.run_in_executor(None, _extract_info_sync, query)
 
-    video_url = info.get("webpage_url") or info.get("url") or query
-    out_id = uuid.uuid4().hex
-    file_path = await loop.run_in_executor(None, _download_sync, video_url, out_id)
+            duration = int(info.get("duration") or 0)
+            if duration and duration > MAX_TRACK_SECONDS:
+                raise TrackTooLong(f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit")
 
-    return {
-        "title": info.get("title") or "Unknown title",
-        "url": video_url,
-        "duration": duration,
-        "thumbnail": info.get("thumbnail"),
-        "file_path": file_path,
-    }
+            video_url = info.get("webpage_url") or info.get("url") or query
+            out_id = uuid.uuid4().hex
+            file_path = await loop.run_in_executor(None, _download_sync, video_url, out_id)
+
+            return {
+                "title": info.get("title") or "Unknown title",
+                "url": video_url,
+                "duration": duration,
+                "thumbnail": info.get("thumbnail"),
+                "file_path": file_path,
+            }
+        except (TrackNotFound, TrackTooLong):
+            raise  # definitive — no point retrying
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    raise last_exc  # type: ignore[misc]
 
 
 def cleanup_file(file_path: str) -> None:
