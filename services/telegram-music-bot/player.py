@@ -21,7 +21,10 @@ class VoiceChatPlayer:
     def __init__(self, calls: PyTgCalls, queues: QueueManager) -> None:
         self.calls = calls
         self.queues = queues
-        self.calls.on_update(self._on_stream_end)
+        # `on_update` is a decorator *factory* (`on_update(filters=None)` ->
+        # decorator); calling it directly with the handler as `filters` never
+        # registers anything. `add_handler` is the actual registration call.
+        self.calls.add_handler(self._on_stream_end)
         # Notified whenever a track actually starts streaming (initial /play
         # and every automatic/manual advance), so the chat layer can post a
         # fresh now-playing message with a live progress bar.
@@ -72,11 +75,11 @@ class VoiceChatPlayer:
         return nxt
 
     async def pause(self, chat_id: int) -> None:
-        await self.calls.pause_stream(chat_id)
+        await self.calls.pause(chat_id)
         self.queues.state(chat_id).paused = True
 
     async def resume(self, chat_id: int) -> None:
-        await self.calls.resume_stream(chat_id)
+        await self.calls.resume(chat_id)
         self.queues.state(chat_id).paused = False
 
     async def stop(self, chat_id: int) -> None:
