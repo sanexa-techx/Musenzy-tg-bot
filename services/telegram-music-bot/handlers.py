@@ -98,6 +98,13 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
 def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
     tracker = NowPlayingTracker()
 
+    # Deduplication: track message IDs we've already started handling so that
+    # Telegram re-deliveries (which happen when the bot is slow) don't fire the
+    # handler a second time for the same /play command.
+    _seen_message_ids: set[int] = set()
+    # Per-chat locks: prevent two concurrent /play downloads in the same chat.
+    _chat_locks: dict[int, asyncio.Lock] = {}
+
     def _controls(chat_id: int):
         return player_controls(paused=queues.state(chat_id).paused)
 
@@ -154,6 +161,15 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
 
     @bot.on_message(filters.command("play") & filters.group)
     async def play_cmd(client: Client, message: Message) -> None:
+        # Drop duplicate deliveries of the same message (Telegram re-sends
+        # unacknowledged updates when the bot is slow, e.g. during yt-dlp fetch).
+        if message.id in _seen_message_ids:
+            return
+        _seen_message_ids.add(message.id)
+        # Keep the set bounded — discard old IDs after 500 entries.
+        if len(_seen_message_ids) > 500:
+            _seen_message_ids.discard(next(iter(_seen_message_ids)))
+
         query = message.text.split(maxsplit=1)
         if len(query) < 2:
             await message.reply_text("Usage: /play <song name or YouTube link>")
@@ -164,49 +180,56 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             await message.reply_text(join_error)
             return
 
-        status = await message.reply_text(f"🔍 Searching for \"{query[1]}\"")
-        with contextlib.suppress(Exception):
-            await message.delete()
-        anim_task = asyncio.create_task(_animate_searching(status, query[1]))
-        try:
-            info = await resolve_and_download(query[1])
-        except TrackTooLong as exc:
-            await status.edit_text(str(exc))
+        # Per-chat lock: only one download at a time per group.
+        lock = _chat_locks.setdefault(message.chat.id, asyncio.Lock())
+        if lock.locked():
+            await message.reply_text("⏳ Already fetching a track — please wait.")
             return
-        except TrackNotFound:
-            await status.edit_text("Couldn't find that track. Try a different search.")
-            return
-        except Exception:
-            await status.edit_text("Something went wrong fetching that track. Try again.")
-            raise
-        finally:
-            anim_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await anim_task
 
-        requester = message.from_user.mention if message.from_user else "someone"
-        track = Track(
-            title=info["title"],
-            url=info["url"],
-            stream_url=info["url"],
-            duration=info["duration"],
-            thumbnail=info["thumbnail"],
-            requested_by=requester,
-            file_path=info["file_path"],
-        )
+        async with lock:
+            status = await message.reply_text(f"🔍 Searching for \"{query[1]}\"")
+            with contextlib.suppress(Exception):
+                await message.delete()
+            anim_task = asyncio.create_task(_animate_searching(status, query[1]))
+            try:
+                info = await resolve_and_download(query[1])
+            except TrackTooLong as exc:
+                await status.edit_text(str(exc))
+                return
+            except TrackNotFound:
+                await status.edit_text("Couldn't find that track. Try a different search.")
+                return
+            except Exception:
+                await status.edit_text("Something went wrong fetching that track. Try again.")
+                raise
+            finally:
+                anim_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await anim_task
 
-        position = await player.play_or_enqueue(message.chat.id, track)
-        if position == 0:
-            # The on_track_start callback already posted the live now-playing
-            # message with its progress bar -- just clear the search status.
-            await status.delete()
-        else:
-            text = _format_track(track, position)
-            if track.thumbnail:
+            requester = message.from_user.mention if message.from_user else "someone"
+            track = Track(
+                title=info["title"],
+                url=info["url"],
+                stream_url=info["url"],
+                duration=info["duration"],
+                thumbnail=info["thumbnail"],
+                requested_by=requester,
+                file_path=info["file_path"],
+            )
+
+            position = await player.play_or_enqueue(message.chat.id, track)
+            if position == 0:
+                # The on_track_start callback already posted the live now-playing
+                # message with its progress bar -- just clear the search status.
                 await status.delete()
-                await message.reply_photo(track.thumbnail, caption=text)
             else:
-                await status.edit_text(text)
+                text = _format_track(track, position)
+                if track.thumbnail:
+                    await status.delete()
+                    await message.reply_photo(track.thumbnail, caption=text)
+                else:
+                    await status.edit_text(text)
 
     @bot.on_message(filters.command("skip") & filters.group)
     async def skip_cmd(_client: Client, message: Message) -> None:
