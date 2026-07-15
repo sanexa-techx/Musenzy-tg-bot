@@ -155,6 +155,8 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             return
 
         status = await message.reply_text(f"🔍 Searching for \"{query[1]}\"")
+        with contextlib.suppress(Exception):
+            await message.delete()
         anim_task = asyncio.create_task(_animate_searching(status, query[1]))
         try:
             info = await resolve_and_download(query[1])
@@ -265,3 +267,7 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
                 lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
             await query.answer()
             await query.message.reply_text("\n".join(lines))
+        elif action == "close":
+            await query.answer()
+            with contextlib.suppress(Exception):
+                await query.message.delete()

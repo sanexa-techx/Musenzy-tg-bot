@@ -25,5 +25,8 @@ def player_controls(paused: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⏹", callback_data="ctl:stop"),
                 InlineKeyboardButton("📜", callback_data="ctl:queue"),
             ],
+            [
+                InlineKeyboardButton("❌ Close", callback_data="ctl:close"),
+            ],
         ]
     )
