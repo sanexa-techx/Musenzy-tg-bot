@@ -11,45 +11,41 @@ from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# When YouTube's bot-check blocks every anonymous client from this
-# environment's IP (message: "Sign in to confirm you're not a bot"), the
-# only reliable fix is authenticating with real browser cookies exported
-# from a logged-in YouTube account (Netscape cookies.txt format). Drop that
-# file at COOKIES_FILE and it's picked up automatically; without it we fall
-# back to anonymous clients, which may get blocked.
+# Cookies file: authenticates with YouTube to bypass bot-check on cloud IPs.
+# Drop a Netscape-format cookies.txt here and it's picked up automatically.
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-# No extractor_args and no cookiefile.
-#
-# yt-dlp in this environment has no JavaScript runtime available (EJS
-# requirement), so DASH/adaptive formats that need signature solving are
-# unavailable. However, format 18 (mp4 360p, combined audio+video, legacy
-# YouTube stream) does NOT require JS solving and is reliably available for
-# public videos via the default web client without cookies.
-#
-# Passing cookies causes yt-dlp to skip the ios client (which it would use
-# as a fallback) and forces web clients that then need JS solving.
-# Not passing cookies lets yt-dlp pick format 18 freely.
-#
-# _FORMAT: prefer audio-only streams first; fall back to best mp4 combined
-# (format 18), then anything. ffmpeg's FFmpegExtractAudio postprocessor
-# strips the audio track from combined formats transparently.
-_FORMAT = "bestaudio/best[ext=mp4]/best"
+# JS runtime: yt-dlp needs a JS runtime to solve YouTube's signature/n-challenges
+# for DASH/bestaudio formats. Node 20 (present here) is below yt-dlp's minimum
+# of v22, but Bun 1.3.6 meets the requirement (>=1.2.11). Pass js_runtimes
+# explicitly — yt-dlp defaults to deno-only which is not installed here.
+# yt_dlp_ejs (Python package, installed via pip) provides the solver scripts.
+_JS_RUNTIMES = {"bun": {}}
+
+
+def _base_opts() -> dict:
+    opts: dict = {"js_runtimes": _JS_RUNTIMES}
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
+
 
 _SEARCH_OPTS = {
-    "format": _FORMAT,
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch1",
     "skip_download": True,
+    **_base_opts(),
 }
 
 _DOWNLOAD_OPTS = {
-    "format": _FORMAT,
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    **_base_opts(),
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",

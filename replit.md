@@ -10,7 +10,7 @@ A Telegram bot that joins a group's live voice chat and plays music from YouTube
 
 ## Stack
 
-- Python 3.11, Pyrogram (MTProto client), `py-tgcalls` (voice chat streaming), `yt-dlp` (YouTube search/audio), ffmpeg
+- Python 3.11, Pyrogram (MTProto client), `py-tgcalls` (voice chat streaming), `yt-dlp` + `yt-dlp-ejs` (YouTube search/audio + JS challenge solver), Bun (JS runtime for yt-dlp signature solving), ffmpeg
 - Node/TypeScript pnpm workspace remains for other artifacts (API server, mockup sandbox) but is not used by the bot
 
 ## Where things live
