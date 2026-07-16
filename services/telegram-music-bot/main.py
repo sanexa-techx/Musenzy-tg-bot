@@ -25,8 +25,20 @@ async def run() -> None:
             "services/telegram-music-bot/generate_session.py, then set it in Replit Secrets."
         )
 
-    bot = Client("music_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-    assistant = Client("music_assistant", api_id=API_ID, api_hash=API_HASH, session_string=ASSISTANT_SESSION, in_memory=True)
+    # Use a named session file so the same Telegram session is reused on
+    # every restart.  in_memory=True creates a fresh session each time,
+    # leaving the old one alive on Telegram's side — both then receive
+    # updates and everything appears twice.
+    import os
+    session_dir = os.path.dirname(os.path.abspath(__file__))
+    bot = Client(
+        os.path.join(session_dir, "music_bot"),
+        api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN,
+    )
+    assistant = Client(
+        os.path.join(session_dir, "music_assistant"),
+        api_id=API_ID, api_hash=API_HASH, session_string=ASSISTANT_SESSION,
+    )
     calls = PyTgCalls(assistant)
     queues = QueueManager()
     player = VoiceChatPlayer(calls, queues)
