@@ -1,6 +1,7 @@
 """Wraps py-tgcalls to join/stream/leave group voice chats per group."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -34,15 +35,23 @@ class VoiceChatPlayer:
         # button, so the chat layer can stop the progress tracker and post
         # a single "leaving" message from one place.
         self.on_queue_empty: Optional[Callable[[int], Awaitable[None]]] = None
+        # Per-chat locks: py-tgcalls can fire StreamEnded more than once for
+        # the same track; the lock ensures only the first event is processed.
+        self._stream_end_locks: dict[int, asyncio.Lock] = {}
 
     async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
         if not isinstance(update, StreamEnded):
             return
         chat_id = update.chat_id
-        current = self.queues.state(chat_id).current
-        if current:
-            cleanup_file(current.file_path)
-        await self.play_next(chat_id)
+        lock = self._stream_end_locks.setdefault(chat_id, asyncio.Lock())
+        if lock.locked():
+            # A StreamEnded for this chat is already being handled — drop duplicate.
+            return
+        async with lock:
+            current = self.queues.state(chat_id).current
+            if current:
+                cleanup_file(current.file_path)
+            await self.play_next(chat_id)
 
     async def play_or_enqueue(self, chat_id: int, track: Track) -> int:
         position = self.queues.enqueue(chat_id, track)

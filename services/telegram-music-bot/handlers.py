@@ -19,6 +19,11 @@ from youtube import TrackNotFound, TrackTooLong, resolve_and_download
 
 log = logging.getLogger("handlers")
 
+# Module-level dedup sets — survive handler re-registration and are shared
+# across all closures so a duplicate delivery is always caught.
+_seen_message_ids: set[int] = set()
+_seen_callback_ids: set[str] = set()
+
 COMMANDS_TEXT = (
     "Commands:\n"
     "/play <song name or link> -- play or queue a track\n"
@@ -129,10 +134,6 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
 def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
     tracker = NowPlayingTracker()
 
-    # Deduplication: track message IDs we've already started handling so that
-    # Telegram re-deliveries (which happen when the bot is slow) don't fire the
-    # handler a second time for the same /play command.
-    _seen_message_ids: set[int] = set()
     # Per-chat locks: prevent two concurrent /play downloads in the same chat.
     _chat_locks: dict[int, asyncio.Lock] = {}
 
@@ -354,13 +355,21 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
 
     @bot.on_callback_query(filters.regex(r"^ctl:"))
     async def controls_cb(client: Client, query: CallbackQuery) -> None:
+        # Deduplicate: Telegram re-delivers unacknowledged callback queries.
+        if query.id in _seen_callback_ids:
+            return
+        _seen_callback_ids.add(query.id)
+        if len(_seen_callback_ids) > 500:
+            _seen_callback_ids.discard(next(iter(_seen_callback_ids)))
+
         action = query.data.split(":", 1)[1]
         chat_id = query.message.chat.id
 
         # queue and close are read-only — anyone can use them.
         if action not in ("queue", "close"):
             if not await _is_admin(client, chat_id, query.from_user.id):
-                await query.answer("🚫 Only admins can control playback.", show_alert=True)
+                with contextlib.suppress(Exception):
+                    await query.answer("🚫 Only admins can control playback.", show_alert=True)
                 return
 
         state = queues.state(chat_id)
@@ -369,31 +378,39 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             if state.paused:
                 await player.resume(chat_id)
                 tracker.resume(chat_id)
-                await query.answer("Resumed")
+                with contextlib.suppress(Exception):
+                    await query.answer("Resumed")
             else:
                 await player.pause(chat_id)
                 tracker.pause(chat_id)
-                await query.answer("Paused")
-            if query.message.reply_markup:
-                await query.message.edit_reply_markup(player_controls(paused=state.paused))
+                with contextlib.suppress(Exception):
+                    await query.answer("Paused")
+            with contextlib.suppress(Exception):
+                if query.message.reply_markup:
+                    await query.message.edit_reply_markup(player_controls(paused=state.paused))
         elif action == "skip":
             await player.play_next(chat_id)
-            await query.answer("Skipped")
+            with contextlib.suppress(Exception):
+                await query.answer("Skipped")
         elif action == "stop":
             tracker.stop(chat_id)
             await player.stop(chat_id)
-            await query.answer("Stopped")
+            with contextlib.suppress(Exception):
+                await query.answer("Stopped")
             await query.message.reply_text("Stopped and left the voice chat.")
         elif action == "queue":
             if not state.current:
-                await query.answer("Nothing playing", show_alert=True)
+                with contextlib.suppress(Exception):
+                    await query.answer("Nothing playing", show_alert=True)
                 return
             lines = [_format_track(state.current)]
             for i, track in enumerate(state.queue, start=1):
                 lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
-            await query.answer()
+            with contextlib.suppress(Exception):
+                await query.answer()
             await query.message.reply_text("\n".join(lines))
         elif action == "close":
-            await query.answer()
+            with contextlib.suppress(Exception):
+                await query.answer()
             with contextlib.suppress(Exception):
                 await query.message.delete()
