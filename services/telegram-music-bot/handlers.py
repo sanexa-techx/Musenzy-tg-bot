@@ -10,8 +10,9 @@ from pyrogram import Client, enums, filters
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
-from config import LOGO_PATH
-from keyboards import player_controls, welcome_menu
+from broadcast import BroadcastManager
+from config import LOGO_PATH, OWNER_ID
+from keyboards import broadcast_schedule_menu, player_controls, welcome_menu
 from player import VoiceChatPlayer
 from progress import NowPlayingTracker, render_bar
 from queue_manager import QueueManager, Track
@@ -131,7 +132,13 @@ async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: 
     return None
 
 
-def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, queues: QueueManager) -> None:
+def register_handlers(
+    bot: Client,
+    assistant: Client,
+    player: VoiceChatPlayer,
+    queues: QueueManager,
+    broadcaster: BroadcastManager,
+) -> None:
     tracker = NowPlayingTracker()
 
     # Per-chat locks: prevent two concurrent /play downloads in the same chat.
@@ -214,6 +221,9 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         # Keep the set bounded — discard old IDs after 500 entries.
         if len(_seen_message_ids) > 500:
             _seen_message_ids.discard(next(iter(_seen_message_ids)))
+
+        # Track this group so broadcast can reach it.
+        broadcaster.register_chat(message.chat.id)
 
         query = message.text.split(maxsplit=1)
         chat_id = message.chat.id
@@ -414,3 +424,103 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
                 await query.answer()
             with contextlib.suppress(Exception):
                 await query.message.delete()
+
+    # ──────────────────────────────────────────────
+    # Broadcast — owner only
+    # ──────────────────────────────────────────────
+
+    def _is_owner(user_id: int) -> bool:
+        return OWNER_ID != 0 and user_id == OWNER_ID
+
+    @bot.on_message(filters.command("broadcast") & filters.private)
+    async def broadcast_cmd(_client: Client, message: Message) -> None:
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        # Determine the message text: either inline, a reply, or prompt.
+        text: str | None = None
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text.html
+        elif len(message.text.split(maxsplit=1)) > 1:
+            text = html.escape(message.text.split(maxsplit=1)[1])
+
+        if not text:
+            await message.reply_text(
+                "📝 Please send the message you want to broadcast as a reply to this command, "
+                "or write it after the command:\n\n<code>/broadcast Hello everyone!</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        broadcaster.set_pending(message.from_user.id, text)
+        active = broadcaster.active_schedule_hours()
+        chats = len(broadcaster.known_chats())
+        await message.reply_text(
+            f"📢 <b>Broadcast ready</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Message:</b>\n{text}\n\n"
+            f"<b>Groups:</b> {chats}\n"
+            + (f"<b>Active schedule:</b> every {active}h\n" if active else "")
+            + "\nChoose when to send:",
+            parse_mode=enums.ParseMode.HTML,
+            reply_markup=broadcast_schedule_menu(active_hours=active),
+        )
+
+    @bot.on_callback_query(filters.regex(r"^bcast:"))
+    async def broadcast_cb(_client: Client, query: CallbackQuery) -> None:
+        if not _is_owner(query.from_user.id):
+            with contextlib.suppress(Exception):
+                await query.answer("🚫 Owner only.", show_alert=True)
+            return
+
+        action = query.data.split(":", 1)[1]
+        owner_id = query.from_user.id
+        text = broadcaster.get_pending(owner_id)
+
+        if action == "close":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            with contextlib.suppress(Exception):
+                await query.message.delete()
+            return
+
+        if action == "cancel":
+            had = broadcaster.cancel_schedule()
+            with contextlib.suppress(Exception):
+                await query.answer("Schedule cancelled." if had else "No active schedule.", show_alert=True)
+            with contextlib.suppress(Exception):
+                await query.message.edit_reply_markup(broadcast_schedule_menu(active_hours=0))
+            return
+
+        if not text:
+            with contextlib.suppress(Exception):
+                await query.answer("No message set. Use /broadcast first.", show_alert=True)
+            return
+
+        if action == "now":
+            with contextlib.suppress(Exception):
+                await query.answer("Sending…")
+            sent, failed = await broadcaster.send_now(bot, text)
+            broadcaster.clear_pending(owner_id)
+            with contextlib.suppress(Exception):
+                await query.message.edit_text(
+                    f"✅ Broadcast sent to <b>{sent}</b> group(s)"
+                    + (f", failed on <b>{failed}</b>." if failed else "."),
+                    parse_mode=enums.ParseMode.HTML,
+                )
+        elif action in ("1", "2", "3"):
+            hours = int(action)
+            broadcaster.schedule(bot, text, hours)
+            broadcaster.clear_pending(owner_id)
+            with contextlib.suppress(Exception):
+                await query.answer(f"Scheduled every {hours}h ✅")
+            with contextlib.suppress(Exception):
+                await query.message.edit_text(
+                    f"⏰ Broadcast scheduled every <b>{hours}h</b> to "
+                    f"<b>{len(broadcaster.known_chats())}</b> group(s).\n\n"
+                    f"<b>Message:</b>\n{text}\n\n"
+                    "Use /broadcast → 🚫 Cancel Schedule to stop it.",
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=broadcast_schedule_menu(active_hours=hours),
+                )

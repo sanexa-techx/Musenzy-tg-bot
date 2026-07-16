@@ -7,6 +7,7 @@ from pyrogram import Client
 from pyrogram.types import BotCommand
 from pytgcalls import PyTgCalls
 
+from broadcast import BroadcastManager
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN
 from handlers import register_handlers
 from player import VoiceChatPlayer
@@ -42,8 +43,9 @@ async def run() -> None:
     calls = PyTgCalls(assistant)
     queues = QueueManager()
     player = VoiceChatPlayer(calls, queues)
+    broadcaster = BroadcastManager()
 
-    register_handlers(bot, assistant, player, queues)
+    register_handlers(bot, assistant, player, queues, broadcaster)
 
     await assistant.start()
     await calls.start()

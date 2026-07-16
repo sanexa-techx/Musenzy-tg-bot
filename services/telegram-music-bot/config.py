@@ -42,3 +42,7 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "services/telegram-music-bot/downl
 LOGO_PATH = os.environ.get("LOGO_PATH", "services/telegram-music-bot/assets/logo.jpg")
 OWNER_URL = os.environ.get("OWNER_URL", "https://t.me/NONKO_0")
 SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "https://t.me/+-uT8Owz9aKg5N2M1")
+
+# Telegram user ID of the bot owner.  Set OWNER_ID in Replit Secrets.
+# Only this user can use /broadcast and manage scheduled broadcasts.
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
