@@ -50,6 +50,7 @@ class _Session:
     paused_at: float | None = None
     paused_total: float = 0.0
     task: asyncio.Task | None = None
+    stopped: bool = False
 
     def elapsed(self) -> int:
         now = time.monotonic()
@@ -85,8 +86,10 @@ class NowPlayingTracker:
 
     def stop(self, chat_id: int) -> None:
         session = self._sessions.pop(chat_id, None)
-        if session and session.task:
-            session.task.cancel()
+        if session:
+            session.stopped = True          # prevent any in-flight edit from landing
+            if session.task:
+                session.task.cancel()
 
     def pause(self, chat_id: int) -> None:
         session = self._sessions.get(chat_id)
@@ -111,6 +114,9 @@ class NowPlayingTracker:
                     return
                 paused = session.paused_at is not None
                 text = f"{session.caption_prefix}\n\n{render_bar(elapsed, session.duration, paused)}"
+                # Re-check after the sleep — stop() may have fired while we waited.
+                if session.stopped:
+                    return
                 with contextlib.suppress(Exception):
                     if getattr(session.message, "photo", None):
                         await session.message.edit_caption(

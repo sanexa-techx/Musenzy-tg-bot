@@ -232,21 +232,39 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             return
 
         async with lock:
-            # Delete the /play command immediately — no intermediate messages.
+            # Delete the /play command immediately.
             with contextlib.suppress(Exception):
                 await message.delete()
+
+            # Send a searching indicator — a lone animated emoji spins in Telegram.
+            searching_msg = None
+            with contextlib.suppress(Exception):
+                searching_msg = await bot.send_message(chat_id, "🔍")
 
             try:
                 info = await resolve_and_download(query[1])
             except TrackTooLong as exc:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
                 asyncio.create_task(_send_and_delete(chat_id, bot, str(exc)))
                 return
             except TrackNotFound:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
                 asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that track."))
                 return
             except Exception:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
                 asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Something went wrong fetching that track."))
                 raise
+            finally:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
 
             user = message.from_user
             if user:
