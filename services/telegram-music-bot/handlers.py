@@ -143,6 +143,12 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         """Sends a fresh "now playing" message and starts its live progress
         bar. Fires on every track start -- the initial /play, /skip, button
         skips, and automatic advance when a track finishes."""
+        # Delete the previous Now Playing card before posting the new one.
+        old_message = tracker.current_message(chat_id)
+        if old_message is not None:
+            with contextlib.suppress(Exception):
+                await old_message.delete()
+
         caption = _format_track(track)
         bar = render_bar(0, track.duration, paused=False)
         text = f"{caption}\n\n{bar}"

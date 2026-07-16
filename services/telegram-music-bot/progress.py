@@ -84,6 +84,11 @@ class NowPlayingTracker:
         self._sessions[chat_id] = session
         session.task = asyncio.create_task(self._run(chat_id))
 
+    def current_message(self, chat_id: int) -> Any | None:
+        """Return the tracked message for chat_id, or None if there is none."""
+        session = self._sessions.get(chat_id)
+        return session.message if session else None
+
     def stop(self, chat_id: int) -> None:
         session = self._sessions.pop(chat_id, None)
         if session:
