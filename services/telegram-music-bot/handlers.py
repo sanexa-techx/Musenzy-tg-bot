@@ -48,6 +48,15 @@ def _format_track(track: Track, position: int | None = None) -> str:
     )
 
 
+async def _is_admin(client: Client, chat_id: int, user_id: int) -> bool:
+    """Return True if user_id is an admin or creator in chat_id."""
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status.value in ("administrator", "owner", "creator")
+    except Exception:
+        return False
+
+
 async def _send_and_delete(chat_id: int, bot: Client, text: str, delay: int = 8) -> None:
     """Send a temporary message and delete it after `delay` seconds."""
     try:
@@ -243,25 +252,45 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             # position == 0: on_track_start already posted the "Now playing" card.
 
     @bot.on_message(filters.command("skip") & filters.group)
-    async def skip_cmd(_client: Client, message: Message) -> None:
+    async def skip_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can skip tracks."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
         nxt = await player.play_next(message.chat.id)
         if nxt:
             await message.reply_text("⏭ Skipped.")
 
     @bot.on_message(filters.command("pause") & filters.group)
-    async def pause_cmd(_client: Client, message: Message) -> None:
+    async def pause_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can pause playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
         await player.pause(message.chat.id)
         tracker.pause(message.chat.id)
         await message.reply_text("⏸ Paused.")
 
     @bot.on_message(filters.command("resume") & filters.group)
-    async def resume_cmd(_client: Client, message: Message) -> None:
+    async def resume_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can resume playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
         await player.resume(message.chat.id)
         tracker.resume(message.chat.id)
         await message.reply_text("▶️ Resumed.")
 
     @bot.on_message(filters.command("stop") & filters.group)
-    async def stop_cmd(_client: Client, message: Message) -> None:
+    async def stop_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can stop playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
         tracker.stop(message.chat.id)
         await player.stop(message.chat.id)
         await message.reply_text("Stopped and left the voice chat.")
@@ -278,9 +307,16 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
         await message.reply_text("\n".join(lines))
 
     @bot.on_callback_query(filters.regex(r"^ctl:"))
-    async def controls_cb(_client: Client, query: CallbackQuery) -> None:
+    async def controls_cb(client: Client, query: CallbackQuery) -> None:
         action = query.data.split(":", 1)[1]
         chat_id = query.message.chat.id
+
+        # queue and close are read-only — anyone can use them.
+        if action not in ("queue", "close"):
+            if not await _is_admin(client, chat_id, query.from_user.id):
+                await query.answer("🚫 Only admins can control playback.", show_alert=True)
+                return
+
         state = queues.state(chat_id)
 
         if action == "pauseresume":
