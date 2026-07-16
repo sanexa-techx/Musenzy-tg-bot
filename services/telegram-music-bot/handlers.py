@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 
-from pyrogram import Client, filters
+from pyrogram import Client, enums, filters
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
@@ -41,10 +42,20 @@ def _format_duration(seconds: int) -> str:
 
 def _format_track(track: Track, position: int | None = None) -> str:
     duration = _format_duration(track.duration)
+    title = html.escape(track.title)
+    requester = track.requested_by
     if position is None:
-        return f"🎶 Now playing: {track.title}\n⏱ Duration: {duration}\n👤 Requested by: {track.requested_by}"
+        return (
+            "🎵 <b>ɴᴏᴡ ᴘʟᴀʏɪɴɢ</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎧 <b>{title}</b>\n\n"
+            f"⏱ <code>{duration}</code>   ·   👤 {requester}"
+        )
     return (
-        f"➕ Queued at #{position}: {track.title}\n⏱ Duration: {duration}\n👤 Requested by: {track.requested_by}"
+        f"✨ <b>ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ</b>  <code>#{position}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎧 <b>{title}</b>\n\n"
+        f"⏱ <code>{duration}</code>   ·   👤 {requester}"
     )
 
 
@@ -139,15 +150,22 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
             if track.thumbnail:
                 try:
                     message = await bot.send_photo(
-                        chat_id, track.thumbnail, caption=text, reply_markup=_controls(chat_id)
+                        chat_id, track.thumbnail, caption=text,
+                        reply_markup=_controls(chat_id),
+                        parse_mode=enums.ParseMode.HTML,
                     )
                 except FloodWait as e:
                     log.warning("FloodWait %ds on send_photo for chat %s — falling back to text", e.value, chat_id)
                     await asyncio.sleep(min(e.value, 10))
-                    # Fall back to a text-only message so the user always gets a response.
-                    message = await bot.send_message(chat_id, text, reply_markup=_controls(chat_id))
+                    message = await bot.send_message(
+                        chat_id, text, reply_markup=_controls(chat_id),
+                        parse_mode=enums.ParseMode.HTML,
+                    )
             else:
-                message = await bot.send_message(chat_id, text, reply_markup=_controls(chat_id))
+                message = await bot.send_message(
+                    chat_id, text, reply_markup=_controls(chat_id),
+                    parse_mode=enums.ParseMode.HTML,
+                )
         except Exception:
             log.exception("Failed to post now-playing message for chat %s", chat_id)
             return
@@ -230,7 +248,11 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
                 asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Something went wrong fetching that track."))
                 raise
 
-            requester = message.from_user.mention if message.from_user else "someone"
+            user = message.from_user
+            if user:
+                requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+            else:
+                requester = "someone"
             track = Track(
                 title=info["title"],
                 url=info["url"],
@@ -246,9 +268,9 @@ def register_handlers(bot: Client, assistant: Client, player: VoiceChatPlayer, q
                 # Queued — on_track_start won't fire yet, so post the queued message here.
                 text = _format_track(track, position)
                 if track.thumbnail:
-                    await message.reply_photo(track.thumbnail, caption=text)
+                    await message.reply_photo(track.thumbnail, caption=text, parse_mode=enums.ParseMode.HTML)
                 else:
-                    await message.reply_text(text)
+                    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
             # position == 0: on_track_start already posted the "Now playing" card.
 
     @bot.on_message(filters.command("skip") & filters.group)
