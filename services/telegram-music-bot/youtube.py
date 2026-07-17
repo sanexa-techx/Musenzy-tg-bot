@@ -133,6 +133,42 @@ async def resolve_and_download(query: str) -> dict:
     raise last_exc  # type: ignore[misc]
 
 
+async def fetch_playlist_entries(url: str, max_tracks: int = 50) -> list[dict]:
+    """Return a list of flat playlist entry dicts (id, title, url) without
+    downloading audio. Fast — uses yt-dlp extract_flat mode.
+
+    Caps at *max_tracks* entries. Raises ValueError for non-playlist URLs.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _sync() -> list[dict]:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "playlistend": max_tracks,
+            **_base_opts(),
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            raise ValueError("Could not fetch playlist info")
+        entries = info.get("entries") or []
+        results = []
+        for e in entries:
+            if not e or not e.get("id"):
+                continue
+            vid_url = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e['id']}"
+            results.append({
+                "id": e["id"],
+                "title": e.get("title") or "Unknown",
+                "url": vid_url,
+            })
+        return results[:max_tracks]
+
+    return await loop.run_in_executor(None, _sync)
+
+
 def cleanup_file(file_path: str) -> None:
     try:
         if file_path and os.path.exists(file_path):

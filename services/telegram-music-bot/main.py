@@ -12,6 +12,7 @@ from broadcast import BroadcastManager
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN
 from handlers import register_handlers
 from player import VoiceChatPlayer
+from playlist_manager import PlaylistManager
 from queue_manager import QueueManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -46,8 +47,9 @@ async def run() -> None:
     player = VoiceChatPlayer(calls, queues)
     broadcaster = BroadcastManager()
     autoplayer = AutoplayManager()
+    playlist_mgr = PlaylistManager()
 
-    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer)
+    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer, playlist_mgr)
 
     await assistant.start()
     await calls.start()
@@ -60,6 +62,10 @@ async def run() -> None:
         BotCommand("resume", "Resume playback"),
         BotCommand("stop", "Stop and leave the voice chat"),
         BotCommand("queue", "Show the current queue"),
+        BotCommand("playlist", "📋 Play a YouTube playlist or saved playlist"),
+        BotCommand("saveplaylist", "💾 Save a playlist under a name"),
+        BotCommand("myplaylists", "📂 List your saved playlists"),
+        BotCommand("deleteplaylist", "🗑 Delete a saved playlist"),
         BotCommand("autoplay", "🔄 Enable autoplay of related songs"),
         BotCommand("stopautoplay", "⏹ Stop autoplay"),
         BotCommand("broadcast", "📢 Owner: broadcast a message to all groups"),

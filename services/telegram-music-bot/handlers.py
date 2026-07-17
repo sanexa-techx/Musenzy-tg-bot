@@ -15,9 +15,10 @@ from broadcast import BroadcastManager
 from config import LOGO_PATH, OWNER_ID
 from keyboards import broadcast_schedule_menu, player_controls, welcome_menu
 from player import VoiceChatPlayer
+from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker, render_bar
 from queue_manager import QueueManager, Track
-from youtube import TrackNotFound, TrackTooLong, get_related_track, resolve_and_download
+from youtube import TrackNotFound, TrackTooLong, fetch_playlist_entries, get_related_track, resolve_and_download
 
 log = logging.getLogger("handlers")
 
@@ -140,11 +141,15 @@ def register_handlers(
     queues: QueueManager,
     broadcaster: BroadcastManager,
     autoplayer: AutoplayManager,
+    playlists: PlaylistManager,
 ) -> None:
     tracker = NowPlayingTracker()
 
     # Per-chat locks: prevent two concurrent /play downloads in the same chat.
     _chat_locks: dict[int, asyncio.Lock] = {}
+
+    # Background playlist-loading tasks per chat (cancelled on /stop).
+    _playlist_tasks: dict[int, asyncio.Task] = {}
 
     def _controls(chat_id: int):
         return player_controls(paused=queues.state(chat_id).paused)
@@ -384,6 +389,10 @@ def register_handlers(
             with contextlib.suppress(Exception):
                 await message.delete()
             return
+        # Cancel any background playlist loading for this chat.
+        task = _playlist_tasks.pop(message.chat.id, None)
+        if task:
+            task.cancel()
         tracker.stop(message.chat.id)
         await player.stop(message.chat.id)
         await message.reply_text("Stopped and left the voice chat.")
@@ -400,6 +409,221 @@ def register_handlers(
             lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
         lines.append(f"\n🔄 Autoplay: {ap_status}")
         await message.reply_text("\n".join(lines))
+
+    # ──────────────────────────────────────────────
+    # Playlist commands
+    # ──────────────────────────────────────────────
+
+    @bot.on_message(filters.command("playlist") & filters.group)
+    async def playlist_cmd(client: Client, message: Message) -> None:
+        """Play a YouTube playlist URL or a user's saved playlist by name."""
+        parts = message.text.split(maxsplit=1)
+        chat_id = message.chat.id
+        broadcaster.register_chat(chat_id)
+
+        if len(parts) < 2:
+            await message.reply_text(
+                "📋 <b>Playlist usage</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "/playlist &lt;youtube_playlist_url&gt;\n"
+                "/playlist &lt;saved_name&gt;\n\n"
+                "Save a playlist first with:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        arg = parts[1].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        # Resolve saved name → URL if arg is not a URL.
+        url = arg
+        if not arg.startswith("http"):
+            saved_url = playlists.get(user_id, arg)
+            if not saved_url:
+                await message.reply_text(
+                    f"❌ No saved playlist named <code>{html.escape(arg)}</code>.\n"
+                    "Use /myplaylists to see your saved playlists.",
+                    parse_mode=enums.ParseMode.HTML,
+                )
+                return
+            url = saved_url
+
+        join_error = await _ensure_assistant_in_chat(client, assistant, chat_id)
+        if join_error:
+            asyncio.create_task(_send_and_delete(chat_id, bot, join_error))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        status_msg = await bot.send_message(chat_id, "📋 Fetching playlist info…")
+
+        try:
+            entries = await fetch_playlist_entries(url, max_tracks=50)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text(
+                    "❌ Couldn't fetch that playlist. Make sure it's a valid, public YouTube playlist URL."
+                )
+            return
+
+        if not entries:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text("❌ Playlist is empty or not accessible.")
+            return
+
+        user = message.from_user
+        if user:
+            requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+        else:
+            requester = "someone"
+
+        total = len(entries)
+        with contextlib.suppress(Exception):
+            await status_msg.edit_text(
+                f"📋 Found <b>{total}</b> track(s) — downloading first song…",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+        # Download and start the first track immediately.
+        try:
+            first_info = await resolve_and_download(entries[0]["url"])
+        except Exception:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text("❌ Couldn't load the first track in the playlist.")
+            return
+
+        first_track = Track(
+            title=first_info["title"],
+            url=first_info["url"],
+            stream_url=first_info["url"],
+            duration=first_info["duration"],
+            thumbnail=first_info["thumbnail"],
+            requested_by=requester,
+            file_path=first_info["file_path"],
+        )
+        await player.play_or_enqueue(chat_id, first_track)
+        with contextlib.suppress(Exception):
+            await status_msg.delete()
+
+        if total > 1:
+            # Cancel any prior background loader for this chat.
+            old_task = _playlist_tasks.pop(chat_id, None)
+            if old_task:
+                old_task.cancel()
+
+            async def _load_rest(
+                _entries=entries[1:], _chat_id=chat_id, _req=requester
+            ) -> None:
+                for entry in _entries:
+                    # Stop loading if the voice chat ended (user used /stop).
+                    if queues.state(_chat_id).current is None:
+                        break
+                    try:
+                        info = await resolve_and_download(entry["url"])
+                    except Exception:
+                        continue  # skip unplayable tracks silently
+                    track = Track(
+                        title=info["title"],
+                        url=info["url"],
+                        stream_url=info["url"],
+                        duration=info["duration"],
+                        thumbnail=info["thumbnail"],
+                        requested_by=_req,
+                        file_path=info["file_path"],
+                    )
+                    await player.play_or_enqueue(_chat_id, track)
+                _playlist_tasks.pop(_chat_id, None)
+
+            _playlist_tasks[chat_id] = asyncio.create_task(_load_rest())
+            await bot.send_message(
+                chat_id,
+                f"📋 <b>Playlist loading</b> — queuing <b>{total - 1}</b> more track(s) in the background…",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+    @bot.on_message(filters.command("saveplaylist"))
+    async def saveplaylist_cmd(_client: Client, message: Message) -> None:
+        """Save a YouTube playlist URL under a short name. Works in DM or group."""
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3 or not parts[2].startswith("http"):
+            await message.reply_text(
+                "📋 <b>Save a playlist</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Usage: <code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>\n\n"
+                "Example:\n"
+                "<code>/saveplaylist lofi https://youtube.com/playlist?list=...</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        name = parts[1].strip()
+        url = parts[2].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        if len(name) > 32:
+            await message.reply_text("❌ Playlist name must be 32 characters or fewer.")
+            return
+
+        playlists.save(user_id, name, url)
+        await message.reply_text(
+            f"✅ Saved playlist <b>{html.escape(name)}</b>!\n"
+            f"Use <code>/playlist {html.escape(name)}</code> in any group to play it.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("myplaylists"))
+    async def myplaylists_cmd(_client: Client, message: Message) -> None:
+        """List all saved playlists for the user."""
+        user_id = message.from_user.id if message.from_user else 0
+        saved = playlists.list_playlists(user_id)
+
+        if not saved:
+            await message.reply_text(
+                "📋 You have no saved playlists yet.\n\n"
+                "Save one with:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        lines = ["📋 <b>Your saved playlists</b>\n━━━━━━━━━━━━━━━━━━"]
+        for i, (name, url) in enumerate(saved.items(), 1):
+            lines.append(f"{i}. <b>{html.escape(name)}</b> — <a href=\"{url}\">link</a>")
+        lines.append(
+            "\nUse <code>/playlist &lt;name&gt;</code> in a group to play one.\n"
+            "Delete with <code>/deleteplaylist &lt;name&gt;</code>."
+        )
+        await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML,
+                                 disable_web_page_preview=True)
+
+    @bot.on_message(filters.command("deleteplaylist"))
+    async def deleteplaylist_cmd(_client: Client, message: Message) -> None:
+        """Delete a saved playlist by name."""
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply_text(
+                "Usage: <code>/deleteplaylist &lt;name&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        name = parts[1].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        if playlists.delete(user_id, name):
+            await message.reply_text(
+                f"🗑 Playlist <b>{html.escape(name)}</b> deleted.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        else:
+            await message.reply_text(
+                f"❌ No saved playlist named <code>{html.escape(name)}</code>.",
+                parse_mode=enums.ParseMode.HTML,
+            )
 
     @bot.on_message(filters.command("autoplay") & filters.group)
     async def autoplay_cmd(_client: Client, message: Message) -> None:
