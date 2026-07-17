@@ -426,6 +426,16 @@ def register_handlers(
                 await query.message.delete()
 
     # ──────────────────────────────────────────────
+    # Group auto-registration (for broadcast coverage)
+    # ──────────────────────────────────────────────
+
+    @bot.on_message(filters.group & ~filters.service)
+    async def _register_group(_client: Client, message: Message) -> None:
+        """Silently register every group the bot receives a message from
+        so broadcast can reach it even if /play has never been used there."""
+        broadcaster.register_chat(message.chat.id)
+
+    # ──────────────────────────────────────────────
     # Broadcast — owner only
     # ──────────────────────────────────────────────
 
