@@ -38,6 +38,12 @@ class AutoplayManager:
     def is_enabled(self, chat_id: int) -> bool:
         return self._enabled.get(chat_id, False)
 
+    def enable(self, chat_id: int) -> None:
+        """Force-enable autoplay for a chat."""
+        if not self._enabled.get(chat_id):
+            self._enabled[chat_id] = True
+            _save({str(k): v for k, v in self._enabled.items()})
+
     def disable(self, chat_id: int) -> None:
         """Force-disable (used when autoplay fails or bot is stopped)."""
         if self._enabled.get(chat_id):

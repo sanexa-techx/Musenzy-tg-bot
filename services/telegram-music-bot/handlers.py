@@ -402,37 +402,40 @@ def register_handlers(
         await message.reply_text("\n".join(lines))
 
     @bot.on_message(filters.command("autoplay") & filters.group)
-    async def autoplay_cmd(client: Client, message: Message) -> None:
-        """Toggle autoplay on/off for this group. Admin-only."""
-        if not await _is_admin(client, message.chat.id, message.from_user.id):
-            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can toggle autoplay."))
-            with contextlib.suppress(Exception):
-                await message.delete()
-            return
-
+    async def autoplay_cmd(_client: Client, message: Message) -> None:
+        """Toggle autoplay on — anyone in the group can enable it."""
         broadcaster.register_chat(message.chat.id)
-        enabled = autoplayer.toggle(message.chat.id)
         with contextlib.suppress(Exception):
             await message.delete()
 
-        if enabled:
-            await bot.send_message(
-                message.chat.id,
-                "🔄 <b>Autoplay enabled</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "When the queue ends I'll automatically play related songs "
-                "using YouTube's recommendations.\n\n"
-                "Use <code>/autoplay</code> again to turn it off.",
-                parse_mode=enums.ParseMode.HTML,
-            )
-        else:
-            await bot.send_message(
-                message.chat.id,
-                "🔄 <b>Autoplay disabled</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "The bot will leave the voice chat when the queue runs out.",
-                parse_mode=enums.ParseMode.HTML,
-            )
+        autoplayer.enable(message.chat.id)
+
+        await bot.send_message(
+            message.chat.id,
+            "🔄 <b>Autoplay enabled</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "When the queue ends I'll automatically play related songs "
+            "using YouTube's recommendations.\n\n"
+            "Use <code>/stopautoplay</code> to turn it off.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("stopautoplay") & filters.group)
+    async def stopautoplay_cmd(_client: Client, message: Message) -> None:
+        """Stop autoplay — anyone in the group can disable it."""
+        broadcaster.register_chat(message.chat.id)
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        autoplayer.disable(message.chat.id)
+
+        await bot.send_message(
+            message.chat.id,
+            "🔄 <b>Autoplay disabled</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "The bot will leave the voice chat when the queue runs out.",
+            parse_mode=enums.ParseMode.HTML,
+        )
 
     @bot.on_callback_query(filters.regex(r"^ctl:"))
     async def controls_cb(client: Client, query: CallbackQuery) -> None:

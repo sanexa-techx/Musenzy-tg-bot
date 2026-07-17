@@ -60,7 +60,8 @@ async def run() -> None:
         BotCommand("resume", "Resume playback"),
         BotCommand("stop", "Stop and leave the voice chat"),
         BotCommand("queue", "Show the current queue"),
-        BotCommand("autoplay", "🔄 Toggle autoplay of related songs"),
+        BotCommand("autoplay", "🔄 Enable autoplay of related songs"),
+        BotCommand("stopautoplay", "⏹ Stop autoplay"),
         BotCommand("broadcast", "📢 Owner: broadcast a message to all groups"),
     ])
 
