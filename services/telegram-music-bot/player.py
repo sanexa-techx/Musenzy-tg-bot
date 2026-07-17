@@ -35,6 +35,10 @@ class VoiceChatPlayer:
         # button, so the chat layer can stop the progress tracker and post
         # a single "leaving" message from one place.
         self.on_queue_empty: Optional[Callable[[int], Awaitable[None]]] = None
+        # Optional autoplay hook: called with (chat_id, last_track) when the
+        # queue empties. If it returns a Track the player streams it instead
+        # of leaving. If it returns None the normal on_queue_empty path runs.
+        self.on_autoplay_next: Optional[Callable[[int, "Track"], Awaitable[Optional["Track"]]]] = None
         # Per-chat locks: py-tgcalls can fire StreamEnded more than once for
         # the same track; the lock ensures only the first event is processed.
         self._stream_end_locks: dict[int, asyncio.Lock] = {}
@@ -71,8 +75,21 @@ class VoiceChatPlayer:
             await self.on_track_start(chat_id, track)
 
     async def play_next(self, chat_id: int) -> Track | None:
+        # Save the current track before next_track() clears it — autoplay needs it.
+        last_track = self.queues.state(chat_id).current
         nxt = self.queues.next_track(chat_id)
         if nxt is None:
+            # Queue is empty — try autoplay before leaving.
+            if self.on_autoplay_next and last_track:
+                try:
+                    autoplay_track = await self.on_autoplay_next(chat_id, last_track)
+                except Exception:
+                    autoplay_track = None
+                if autoplay_track is not None:
+                    self.queues.enqueue(chat_id, autoplay_track)
+                    await self._start(chat_id, autoplay_track)
+                    return autoplay_track
+            # No autoplay or it returned nothing — leave normally.
             try:
                 await self.calls.leave_call(chat_id)
             except Exception:

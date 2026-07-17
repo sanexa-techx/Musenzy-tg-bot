@@ -7,6 +7,7 @@ from pyrogram import Client
 from pyrogram.types import BotCommand
 from pytgcalls import PyTgCalls
 
+from autoplay import AutoplayManager
 from broadcast import BroadcastManager
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN
 from handlers import register_handlers
@@ -44,8 +45,9 @@ async def run() -> None:
     queues = QueueManager()
     player = VoiceChatPlayer(calls, queues)
     broadcaster = BroadcastManager()
+    autoplayer = AutoplayManager()
 
-    register_handlers(bot, assistant, player, queues, broadcaster)
+    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer)
 
     await assistant.start()
     await calls.start()
@@ -58,6 +60,7 @@ async def run() -> None:
         BotCommand("resume", "Resume playback"),
         BotCommand("stop", "Stop and leave the voice chat"),
         BotCommand("queue", "Show the current queue"),
+        BotCommand("autoplay", "🔄 Toggle autoplay of related songs"),
         BotCommand("broadcast", "📢 Owner: broadcast a message to all groups"),
     ])
 

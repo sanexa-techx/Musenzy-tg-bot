@@ -139,3 +139,66 @@ def cleanup_file(file_path: str) -> None:
             os.remove(file_path)
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Autoplay: YouTube Radio Mix
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+
+def _extract_video_id(url: str) -> str | None:
+    """Pull the 11-char video ID from any YouTube watch URL."""
+    m = _re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
+def _get_radio_mix_entry_sync(video_id: str) -> dict | None:
+    """Fetch the first *different* entry from the YouTube Radio Mix for video_id.
+
+    YouTube builds a personalised "RD<video_id>" mix playlist that contains
+    the seed track as entry[0] followed by related recommendations — exactly
+    what YouTube's own autoplay uses.
+    """
+    mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,   # fast: only metadata, no full extraction
+        "playlistend": 6,       # grab a few in case entry[0] is the seed itself
+        **_base_opts(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(mix_url, download=False)
+    except Exception:
+        return None
+
+    if not info or "entries" not in info:
+        return None
+
+    entries = [e for e in info["entries"] if e and e.get("id") and e.get("id") != video_id]
+    return entries[0] if entries else None
+
+
+async def get_related_track(last_url: str) -> dict | None:
+    """Return a fully downloaded track dict for the next autoplay song.
+
+    Uses the YouTube Radio Mix seeded on the last-played video.
+    Returns None if no related track can be found or downloaded.
+    """
+    video_id = _extract_video_id(last_url)
+    if not video_id:
+        return None
+
+    loop = asyncio.get_running_loop()
+    entry = await loop.run_in_executor(None, _get_radio_mix_entry_sync, video_id)
+    if not entry:
+        return None
+
+    related_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}"
+    try:
+        return await resolve_and_download(related_url)
+    except Exception:
+        return None

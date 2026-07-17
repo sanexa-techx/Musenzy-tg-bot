@@ -10,13 +10,14 @@ from pyrogram import Client, enums, filters
 from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlreadyParticipant, UserNotParticipant
 from pyrogram.types import CallbackQuery, Message
 
+from autoplay import AutoplayManager
 from broadcast import BroadcastManager
 from config import LOGO_PATH, OWNER_ID
 from keyboards import broadcast_schedule_menu, player_controls, welcome_menu
 from player import VoiceChatPlayer
 from progress import NowPlayingTracker, render_bar
 from queue_manager import QueueManager, Track
-from youtube import TrackNotFound, TrackTooLong, resolve_and_download
+from youtube import TrackNotFound, TrackTooLong, get_related_track, resolve_and_download
 
 log = logging.getLogger("handlers")
 
@@ -138,6 +139,7 @@ def register_handlers(
     player: VoiceChatPlayer,
     queues: QueueManager,
     broadcaster: BroadcastManager,
+    autoplayer: AutoplayManager,
 ) -> None:
     tracker = NowPlayingTracker()
 
@@ -192,8 +194,42 @@ def register_handlers(
         with contextlib.suppress(Exception):
             await bot.send_message(chat_id, "✅ Queue finished, left the voice chat.")
 
+    async def _autoplay_next(chat_id: int, last_track: Track) -> Track | None:
+        """Called by the player when the queue empties. Fetches the next
+        related song via YouTube Radio Mix and returns a ready-to-stream Track,
+        or None if autoplay is disabled / no related track was found."""
+        if not autoplayer.is_enabled(chat_id):
+            return None
+
+        with contextlib.suppress(Exception):
+            await bot.send_message(chat_id, "🔄 <b>Autoplay</b> — fetching next song…", parse_mode=enums.ParseMode.HTML)
+
+        try:
+            info = await get_related_track(last_track.url)
+        except Exception:
+            info = None
+
+        if not info:
+            with contextlib.suppress(Exception):
+                await bot.send_message(
+                    chat_id,
+                    "🔄 Autoplay couldn't find a related track. Leaving voice chat.",
+                )
+            return None
+
+        return Track(
+            title=info["title"],
+            url=info["url"],
+            stream_url=info["url"],
+            duration=info["duration"],
+            thumbnail=info["thumbnail"],
+            requested_by="🔄 Autoplay",
+            file_path=info["file_path"],
+        )
+
     player.on_track_start = _post_now_playing
     player.on_queue_empty = _post_queue_empty
+    player.on_autoplay_next = _autoplay_next
 
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
@@ -355,13 +391,48 @@ def register_handlers(
     @bot.on_message(filters.command("queue") & filters.group)
     async def queue_cmd(_client: Client, message: Message) -> None:
         state = queues.state(message.chat.id)
+        ap_status = "🟢 On" if autoplayer.is_enabled(message.chat.id) else "🔴 Off"
         if not state.current:
-            await message.reply_text("Nothing is playing right now.")
+            await message.reply_text(f"Nothing is playing right now.\n🔄 Autoplay: {ap_status}")
             return
         lines = [_format_track(state.current)]
         for i, track in enumerate(state.queue, start=1):
             lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
+        lines.append(f"\n🔄 Autoplay: {ap_status}")
         await message.reply_text("\n".join(lines))
+
+    @bot.on_message(filters.command("autoplay") & filters.group)
+    async def autoplay_cmd(client: Client, message: Message) -> None:
+        """Toggle autoplay on/off for this group. Admin-only."""
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can toggle autoplay."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        broadcaster.register_chat(message.chat.id)
+        enabled = autoplayer.toggle(message.chat.id)
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        if enabled:
+            await bot.send_message(
+                message.chat.id,
+                "🔄 <b>Autoplay enabled</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "When the queue ends I'll automatically play related songs "
+                "using YouTube's recommendations.\n\n"
+                "Use <code>/autoplay</code> again to turn it off.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        else:
+            await bot.send_message(
+                message.chat.id,
+                "🔄 <b>Autoplay disabled</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "The bot will leave the voice chat when the queue runs out.",
+                parse_mode=enums.ParseMode.HTML,
+            )
 
     @bot.on_callback_query(filters.regex(r"^ctl:"))
     async def controls_cb(client: Client, query: CallbackQuery) -> None:
