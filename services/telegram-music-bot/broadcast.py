@@ -9,6 +9,8 @@ import logging
 import os
 from typing import Any
 
+from pyrogram import enums
+
 log = logging.getLogger("broadcast")
 
 _CHATS_FILE = os.path.join(os.path.dirname(__file__), "known_chats.json")
@@ -72,7 +74,7 @@ class BroadcastManager:
         sent = failed = 0
         for chat_id in list(self._chats):
             try:
-                await bot.send_message(chat_id, text, parse_mode="html")
+                await bot.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML)
                 sent += 1
             except Exception as exc:
                 log.warning("Broadcast failed for chat %s: %s", chat_id, exc)
