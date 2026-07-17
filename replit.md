@@ -42,6 +42,16 @@ A Telegram bot that joins a group's live voice chat and plays music from YouTube
 
 _None recorded yet._
 
+## Regenerating the session string
+
+Run a temporary workflow: `python services/telegram-music-bot/generate_session_interactive.py <phone>`. It writes the result to `.session_tmp/result.txt` and `.session_tmp/session_string.txt`. `config.py` reads the local file first (before the Replit Secret), so the bot picks up a new session automatically on restart — no copy-paste needed.
+
+Steps:
+1. Create a workflow with that command, start it, wait for "WAITING_FOR_CODE" in `.session_tmp/result.txt`
+2. Write the OTP to `.session_tmp/code_input.txt`
+3. Wait for `SESSION_STRING:` in `.session_tmp/result.txt`
+4. Remove the temporary workflow and restart the bot
+
 ## Gotchas
 
 - The group's voice chat must be manually started in Telegram before `/play` will work — the assistant account can only join an already-active voice chat.

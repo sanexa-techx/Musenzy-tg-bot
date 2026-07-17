@@ -1,16 +1,51 @@
 ---
 name: Telegram voice-chat music bots (py-tgcalls)
-description: Dependency and process gotchas when building a Telegram bot that joins group voice chats and streams audio via py-tgcalls/pytgcalls.
+description: Setup, session generation, and gotchas for Telegram voice-chat bots using pyrofork + py-tgcalls on Replit.
 ---
 
-- Telegram's Bot API cannot join or stream into a group voice chat. Only a real user account (MTProto client) can. Architecture needs two Telegram clients: a bot (BotFather token) for commands/buttons, and an "assistant" user account (session string) that actually joins/streams.
-- `py-tgcalls`'s pyrogram backend imports error classes (e.g. `GroupcallForbidden`) that do not exist in mainline PyPI `pyrogram`. Install `pyrofork` instead — it's a maintained fork that installs into the same `pyrogram` import namespace (drop-in, no import changes) and has the classes py-tgcalls expects. Do not pip-install `pyrogram` and `pyrofork` together; uninstall one before installing the other since both occupy the `pyrogram` module path.
-- `py-tgcalls`'s client-type detection (`BridgedClient.package_name`) only recognizes modules literally named `pyrogram` or `telethon` — `hydrogram` is not detected and raises `InvalidMTProtoClient` even though its API is pyrogram-compatible.
-- yt-dlp on Replit (2026.x) requires Bun as JS runtime + `yt_dlp_ejs` Python package for YouTube DASH/bestaudio extraction. Node 20 is present but yt-dlp requires ≥22 — Bun 1.3.6 meets the ≥1.2.11 requirement. `yt-dlp-utils` npm package is blocked by Replit's registry; `yt-dlp-ejs` PyPI package works instead (`pip install yt-dlp-ejs`). Pass `js_runtimes={"bun": {}}` in yt-dlp opts — default is deno-only. Also pass `cookiefile` for bot-check bypass. **Why:** without JS runtime, all DASH formats fail signature solving; without cookies, YouTube bot-checks cloud IPs; iOS client is skipped when cookies are present (yt-dlp limitation), so bun+cookies+yt_dlp_ejs is the only reliable combo on Replit.
+# Telegram voice-chat music bots (py-tgcalls)
 
-## Generating a session string interactively
+## Library choice
+- Use **pyrofork** (not pyrogram). The package name is `pyrofork` in pyproject.toml but it patches the `pyrogram` namespace, so `from pyrogram import Client` works.
 
-- Do not use `nohup ... & disown` from ShellExec to keep a login flow alive across turns — the sandbox kills backgrounded child processes once the shell command that spawned them returns, even with `setsid`.
-- Instead, run the interactive login step (connect → send_code → wait for code → sign_in → export_session_string) as a **workflow** (`configureWorkflow`), since workflows are the platform's actual persistent-process primitive and survive across tool calls. Poll for user-provided input via a small file the workflow process reads, written by a later ShellExec call.
-- Repeatedly reconnecting a **new** process/session per login step (send in one process, sign-in in another) reliably produced `PHONE_CODE_EXPIRED` immediately, even when the code was used within seconds — keeping one long-lived connected client across the whole login flow fixed it.
-- Remove the temporary login workflow once the session string is obtained; delete any local session/state files that contain it before finishing.
+**Why:** pyrogram is no longer maintained; pyrofork is the active fork and is what py-tgcalls targets.
+
+## Session string generation
+
+**Use a Replit Workflow, not ShellExec background/nohup.**
+
+ShellExec background processes (`nohup ... &`, `setsid ... &`) are killed between ShellExec calls. Workflows are managed by Replit and stay alive across turns.
+
+**How to apply:** When generating a TELEGRAM_SESSION_STRING:
+1. `configureWorkflow({ name: "Session Generator", command: "python services/telegram-music-bot/generate_session_interactive.py <phone>", outputType: "console", autoStart: true })`
+2. Poll `.session_tmp/result.txt` for "WAITING_FOR_CODE"
+3. Ask user for OTP, then write it to `.session_tmp/code_input.txt`
+4. Poll result.txt for "SESSION_STRING:"
+5. `removeWorkflow({ name: "Session Generator" })`
+6. Write session to `.session_tmp/session_string.txt` — config.py reads this first
+
+**Why:** The interactive script keeps one live Pyrogram connection open (avoids PHONE_CODE_EXPIRED). ShellExec background processes die between turns.
+
+## Session string copy-paste corruption
+Avoid asking users to copy-paste session strings — they frequently truncate or corrupt them (base64 decoding errors, struct unpack size mismatches). Instead:
+- `generate_session_interactive.py` writes the session to `.session_tmp/result.txt` and `.session_tmp/session_string.txt`
+- `config.py` reads the local file FIRST (before the Replit Secret), so no paste is needed
+- Replit Secrets can have a stale/corrupted value; the local file silently takes priority
+
+**Why:** Session strings are 360+ chars of base64; partial copies cause `binascii.Error: Invalid base64` or `struct.error: unpack requires a buffer of N bytes`.
+
+## Required secrets
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — from https://my.telegram.org
+- `TELEGRAM_BOT_TOKEN` — from @BotFather (can expire; get a fresh one if `ACCESS_TOKEN_EXPIRED`)
+- `TELEGRAM_SESSION_STRING` — generated once via the workflow method above
+
+## Session file priority (config.py pattern)
+```python
+def _get_session():
+    local = os.path.join(os.path.dirname(__file__), ".session_tmp", "session_string.txt")
+    if os.path.exists(local):
+        val = open(local).read().strip()
+        if val:
+            return val
+    return os.environ.get("TELEGRAM_SESSION_STRING") or None
+```

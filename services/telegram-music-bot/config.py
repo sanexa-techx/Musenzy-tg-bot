@@ -32,7 +32,20 @@ BOT_TOKEN = _optional("TELEGRAM_BOT_TOKEN")
 # This is optional at import time so generate_session.py (which only needs
 # API_ID/API_HASH) can run before this value exists. main.py enforces that it
 # is actually set before starting the bot.
-ASSISTANT_SESSION = _optional("TELEGRAM_SESSION_STRING")
+def _get_session() -> str | None:
+    """Read session from a local file written by generate_session_interactive.py
+    (preferred, avoids copy-paste corruption), then fall back to the
+    TELEGRAM_SESSION_STRING env var / Replit Secret."""
+    local = os.path.join(
+        os.path.dirname(__file__), ".session_tmp", "session_string.txt"
+    )
+    if os.path.exists(local):
+        val = open(local).read().strip()
+        if val:
+            return val
+    return os.environ.get("TELEGRAM_SESSION_STRING") or None
+
+ASSISTANT_SESSION = _get_session()
 
 # Optional: restrict playback duration to protect against extremely long videos.
 MAX_TRACK_SECONDS = int(os.environ.get("MAX_TRACK_SECONDS", "10800"))
