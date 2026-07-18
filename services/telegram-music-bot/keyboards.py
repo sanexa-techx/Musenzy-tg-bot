@@ -2,6 +2,7 @@
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import OWNER_URL, SUPPORT_GROUP_URL
+from progress import render_bar_button
 
 
 def broadcast_schedule_menu(active_hours: int = 0) -> InlineKeyboardMarkup:
@@ -41,9 +42,14 @@ def welcome_menu() -> InlineKeyboardMarkup:
     )
 
 
-def player_controls(paused: bool) -> InlineKeyboardMarkup:
+def player_controls(paused: bool, elapsed: int = 0, duration: int = 0) -> InlineKeyboardMarkup:
+    bar_label = render_bar_button(elapsed, duration, paused)
     return InlineKeyboardMarkup(
         [
+            [
+                # Full-width blue progress bar button (no-op tap)
+                InlineKeyboardButton(bar_label, callback_data="ctl:noop"),
+            ],
             [
                 InlineKeyboardButton("▶️" if paused else "⏸", callback_data="ctl:pauseresume"),
                 InlineKeyboardButton("⏭", callback_data="ctl:skip"),

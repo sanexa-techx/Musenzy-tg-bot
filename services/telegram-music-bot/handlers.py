@@ -16,7 +16,7 @@ from config import LOGO_PATH, OWNER_ID
 from keyboards import broadcast_schedule_menu, player_controls, welcome_menu
 from player import VoiceChatPlayer
 from playlist_manager import PlaylistManager
-from progress import NowPlayingTracker, render_bar
+from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
 from youtube import TrackNotFound, TrackTooLong, fetch_playlist_entries, get_related_track, resolve_and_download
 
@@ -151,8 +151,11 @@ def register_handlers(
     # Background playlist-loading tasks per chat (cancelled on /stop).
     _playlist_tasks: dict[int, asyncio.Task] = {}
 
-    def _controls(chat_id: int):
-        return player_controls(paused=queues.state(chat_id).paused)
+    def _controls(chat_id: int, elapsed: int = 0, duration: int = 0):
+        paused = queues.state(chat_id).paused
+        if elapsed == 0 and duration == 0:
+            elapsed, duration = tracker.current_elapsed(chat_id)
+        return player_controls(paused=paused, elapsed=elapsed, duration=duration)
 
     async def _post_now_playing(chat_id: int, track: Track) -> None:
         """Sends a fresh "now playing" message and starts its live progress
@@ -165,32 +168,35 @@ def register_handlers(
                 await old_message.delete()
 
         caption = _format_track(track)
-        bar = render_bar(0, track.duration, paused=False)
-        text = f"{caption}\n\n{bar}"
+        # Bar lives in the keyboard button — caption is track info only.
+        initial_markup = player_controls(paused=False, elapsed=0, duration=track.duration)
         try:
             if track.thumbnail:
                 try:
                     message = await bot.send_photo(
-                        chat_id, track.thumbnail, caption=text,
-                        reply_markup=_controls(chat_id),
+                        chat_id, track.thumbnail, caption=caption,
+                        reply_markup=initial_markup,
                         parse_mode=enums.ParseMode.HTML,
                     )
                 except FloodWait as e:
                     log.warning("FloodWait %ds on send_photo for chat %s — falling back to text", e.value, chat_id)
                     await asyncio.sleep(min(e.value, 10))
                     message = await bot.send_message(
-                        chat_id, text, reply_markup=_controls(chat_id),
+                        chat_id, caption, reply_markup=initial_markup,
                         parse_mode=enums.ParseMode.HTML,
                     )
             else:
                 message = await bot.send_message(
-                    chat_id, text, reply_markup=_controls(chat_id),
+                    chat_id, caption, reply_markup=initial_markup,
                     parse_mode=enums.ParseMode.HTML,
                 )
         except Exception:
             log.exception("Failed to post now-playing message for chat %s", chat_id)
             return
-        tracker.start(chat_id, message, track.duration, caption, lambda cid=chat_id: _controls(cid))
+        tracker.start(
+            chat_id, message, track.duration, caption,
+            lambda e, d, p, cid=chat_id: _controls(cid, e, d),
+        )
 
     async def _post_queue_empty(chat_id: int) -> None:
         """Fires once the queue runs out and the assistant has left the
@@ -672,6 +678,12 @@ def register_handlers(
 
         action = query.data.split(":", 1)[1]
         chat_id = query.message.chat.id
+
+        # Progress bar tap — silently acknowledge, nothing else.
+        if action == "noop":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            return
 
         # queue and close are read-only — anyone can use them.
         if action not in ("queue", "close"):

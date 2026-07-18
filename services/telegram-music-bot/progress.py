@@ -40,12 +40,25 @@ def render_bar(elapsed: int, duration: int, paused: bool, length: int = BAR_LENG
     )
 
 
+def render_bar_button(elapsed: int, duration: int, paused: bool, length: int = BAR_LENGTH) -> str:
+    """Single-line string for an inline keyboard button (the blue progress bar)."""
+    if not duration:
+        icon = "⏸" if paused else "▶"
+        return f"{icon}  🔴 LIVE  •  {format_time(elapsed)}"
+    ratio = min(1.0, elapsed / duration)
+    filled = min(length - 1, int(ratio * length))
+    bar = "—" * filled + "●" + "—" * (length - filled - 1)
+    remaining = max(0, duration - elapsed)
+    return f"{format_time(elapsed)}  |  {bar}  |  -{format_time(remaining)}"
+
+
 @dataclass
 class _Session:
     message: Any
     duration: int
     caption_prefix: str
-    reply_markup_fn: Callable[[], Any]
+    # fn(elapsed, duration, paused) → InlineKeyboardMarkup
+    reply_markup_fn: Callable[[int, int, bool], Any]
     started_at: float = field(default_factory=time.monotonic)
     paused_at: float | None = None
     paused_total: float = 0.0
@@ -66,13 +79,20 @@ class NowPlayingTracker:
     def __init__(self) -> None:
         self._sessions: dict[int, _Session] = {}
 
+    def current_elapsed(self, chat_id: int) -> tuple[int, int]:
+        """Return (elapsed_seconds, duration_seconds) for chat_id, or (0, 0)."""
+        session = self._sessions.get(chat_id)
+        if not session:
+            return 0, 0
+        return session.elapsed(), session.duration
+
     def start(
         self,
         chat_id: int,
         message: Any,
         duration: int,
         caption_prefix: str,
-        reply_markup_fn: Callable[[], Any],
+        reply_markup_fn: Callable[[int, int, bool], Any],
     ) -> None:
         self.stop(chat_id)
         session = _Session(
@@ -118,20 +138,11 @@ class NowPlayingTracker:
                 if session.duration and elapsed >= session.duration:
                     return
                 paused = session.paused_at is not None
-                text = f"{session.caption_prefix}\n\n{render_bar(elapsed, session.duration, paused)}"
                 # Re-check after the sleep — stop() may have fired while we waited.
                 if session.stopped:
                     return
+                markup = session.reply_markup_fn(elapsed, session.duration, paused)
                 with contextlib.suppress(Exception):
-                    if getattr(session.message, "photo", None):
-                        await session.message.edit_caption(
-                            text, reply_markup=session.reply_markup_fn(),
-                            parse_mode=enums.ParseMode.HTML,
-                        )
-                    else:
-                        await session.message.edit_text(
-                            text, reply_markup=session.reply_markup_fn(),
-                            parse_mode=enums.ParseMode.HTML,
-                        )
+                    await session.message.edit_reply_markup(markup)
         except asyncio.CancelledError:
             pass
