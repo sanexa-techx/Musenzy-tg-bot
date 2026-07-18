@@ -51,5 +51,8 @@ def player_controls(paused: bool) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🎵", callback_data="ctl:queue"),
                 InlineKeyboardButton("✖️", callback_data="ctl:close"),
             ],
+            [
+                InlineKeyboardButton("🔵 Add Playlist+", callback_data="ctl:addplaylist"),
+            ],
         ]
     )

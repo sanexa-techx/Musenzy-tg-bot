@@ -1,15 +1,16 @@
 """Entrypoint: starts the bot client (commands/buttons) and the assistant
 client (joins & streams into group voice chats) together."""
 import asyncio
+import contextlib
 import logging
 
 from pyrogram import Client
-from pyrogram.types import BotCommand
+from pyrogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from pytgcalls import PyTgCalls
 
 from autoplay import AutoplayManager
 from broadcast import BroadcastManager
-from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN
+from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN, OWNER_ID
 from handlers import register_handlers
 from player import VoiceChatPlayer
 from playlist_manager import PlaylistManager
@@ -54,7 +55,8 @@ async def run() -> None:
     await assistant.start()
     await calls.start()
     await bot.start()
-    await bot.set_bot_commands([
+    # Public commands — visible to everyone.
+    public_commands = [
         BotCommand("start", "Show welcome message and instructions"),
         BotCommand("play", "Play a song by name or YouTube link"),
         BotCommand("skip", "Skip the current track"),
@@ -68,8 +70,20 @@ async def run() -> None:
         BotCommand("deleteplaylist", "🗑 Delete a saved playlist"),
         BotCommand("autoplay", "🔄 Enable autoplay of related songs"),
         BotCommand("stopautoplay", "⏹ Stop autoplay"),
-        BotCommand("broadcast", "📢 Owner: broadcast a message to all groups"),
-    ])
+    ]
+    await bot.set_bot_commands(public_commands, scope=BotCommandScopeDefault())
+
+    # Owner-only commands — only appear in the owner's private chat menu.
+    if OWNER_ID:
+        owner_commands = public_commands + [
+            BotCommand("broadcast", "📢 Broadcast a message to all groups"),
+            BotCommand("groups", "👥 List all groups the bot is in"),
+        ]
+        with contextlib.suppress(Exception):
+            await bot.set_bot_commands(
+                owner_commands,
+                scope=BotCommandScopeChat(chat_id=OWNER_ID),
+            )
 
     log.info("Bot and assistant are online. Multi-group voice chat music is ready.")
 

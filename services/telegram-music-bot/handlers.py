@@ -717,6 +717,22 @@ def register_handlers(
             with contextlib.suppress(Exception):
                 await query.answer()
             await query.message.reply_text("\n".join(lines))
+        elif action == "addplaylist":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                "🔵 <b>Add Playlist+</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Load any YouTube playlist into the queue:\n"
+                "<code>/playlist &lt;youtube_playlist_url&gt;</code>\n\n"
+                "Play a saved playlist by name:\n"
+                "<code>/playlist &lt;name&gt;</code>\n\n"
+                "Save a playlist for quick access:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>\n\n"
+                "View your saved playlists:\n"
+                "<code>/myplaylists</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
         elif action == "close":
             with contextlib.suppress(Exception):
                 await query.answer()
@@ -739,6 +755,31 @@ def register_handlers(
 
     def _is_owner(user_id: int) -> bool:
         return OWNER_ID != 0 and user_id == OWNER_ID
+
+    @bot.on_message(filters.command("groups") & filters.private)
+    async def groups_cmd(client: Client, message: Message) -> None:
+        """Owner-only: list every group the bot is present in."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        chat_ids = broadcaster.known_chats()
+        if not chat_ids:
+            await message.reply_text("📭 The bot hasn't been added to any groups yet.")
+            return
+
+        lines = [f"👥 <b>Groups the bot is in</b> ({len(chat_ids)} total)\n━━━━━━━━━━━━━━━━━━"]
+        for i, chat_id in enumerate(chat_ids, 1):
+            try:
+                chat = await client.get_chat(chat_id)
+                name = html.escape(chat.title or str(chat_id))
+                members = f"  · {chat.members_count} members" if chat.members_count else ""
+                username = f" (@{chat.username})" if chat.username else ""
+                lines.append(f"{i}. <b>{name}</b>{username}{members}\n   <code>{chat_id}</code>")
+            except Exception:
+                lines.append(f"{i}. <i>Unknown group</i>\n   <code>{chat_id}</code>")
+
+        await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)
 
     @bot.on_message(filters.command("broadcast") & filters.private)
     async def broadcast_cmd(_client: Client, message: Message) -> None:
