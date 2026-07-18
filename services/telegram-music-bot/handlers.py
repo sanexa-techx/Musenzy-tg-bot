@@ -365,8 +365,7 @@ def register_handlers(
                 searching_msg = await bot.send_message(chat_id, "🔍")
 
             try:
-                # Fast path: stream directly — no download wait.
-                info = await resolve_stream_url(query[1])
+                info = await resolve_and_download(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:

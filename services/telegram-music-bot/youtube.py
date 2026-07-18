@@ -289,7 +289,6 @@ async def get_related_track(
 
     related_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}"
     try:
-        # Fast path: no download, stream URL directly
-        return await resolve_stream_url(related_url)
+        return await resolve_and_download(related_url)
     except Exception:
         return None
