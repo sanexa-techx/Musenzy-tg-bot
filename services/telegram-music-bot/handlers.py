@@ -151,11 +151,16 @@ def register_handlers(
     # Background playlist-loading tasks per chat (cancelled on /stop).
     _playlist_tasks: dict[int, asyncio.Task] = {}
 
+    _track_urls: dict[int, str] = {}
+
     def _controls(chat_id: int, elapsed: int = 0, duration: int = 0):
         paused = queues.state(chat_id).paused
         if elapsed == 0 and duration == 0:
             elapsed, duration = tracker.current_elapsed(chat_id)
-        return player_controls(paused=paused, elapsed=elapsed, duration=duration)
+        return player_controls(
+            paused=paused, elapsed=elapsed, duration=duration,
+            track_url=_track_urls.get(chat_id, ""),
+        )
 
     async def _post_now_playing(chat_id: int, track: Track) -> None:
         """Sends a fresh "now playing" message and starts its live progress
@@ -168,8 +173,10 @@ def register_handlers(
                 await old_message.delete()
 
         caption = _format_track(track)
+        # Remember this chat's track URL so the blue bar button can link to it.
+        _track_urls[chat_id] = track.url
         # Bar lives in the keyboard button — caption is track info only.
-        initial_markup = player_controls(paused=False, elapsed=0, duration=track.duration)
+        initial_markup = player_controls(paused=False, elapsed=0, duration=track.duration, track_url=track.url)
         try:
             if track.thumbnail:
                 try:
@@ -678,12 +685,6 @@ def register_handlers(
 
         action = query.data.split(":", 1)[1]
         chat_id = query.message.chat.id
-
-        # Progress bar tap — silently acknowledge, nothing else.
-        if action == "noop":
-            with contextlib.suppress(Exception):
-                await query.answer()
-            return
 
         # queue and close are read-only — anyone can use them.
         if action not in ("queue", "close"):
