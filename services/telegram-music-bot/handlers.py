@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import html
 import logging
@@ -18,7 +19,12 @@ from player import VoiceChatPlayer
 from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
-from youtube import TrackNotFound, TrackTooLong, fetch_playlist_entries, get_related_track, resolve_and_download
+from youtube import (
+    TrackNotFound, TrackTooLong,
+    fetch_playlist_entries, get_related_track,
+    resolve_and_download, resolve_stream_url,
+    _extract_video_id,
+)
 
 log = logging.getLogger("handlers")
 
@@ -151,6 +157,20 @@ def register_handlers(
     # Background playlist-loading tasks per chat (cancelled on /stop).
     _playlist_tasks: dict[int, asyncio.Task] = {}
 
+    # Autoplay: per-chat deque of recently played YouTube video IDs (max 25).
+    # Used to avoid immediate repeats when choosing the next autoplay song.
+    _played_history: dict[int, collections.deque] = {}
+
+    def _record_played(chat_id: int, url: str) -> None:
+        """Add a YouTube video ID to the per-chat play history."""
+        vid = _extract_video_id(url)
+        if vid:
+            hist = _played_history.setdefault(chat_id, collections.deque(maxlen=25))
+            hist.append(vid)
+
+    def _played_ids(chat_id: int) -> frozenset:
+        return frozenset(_played_history.get(chat_id, []))
+
     _track_urls: dict[int, str] = {}
 
     def _controls(chat_id: int, elapsed: int = 0, duration: int = 0):
@@ -173,6 +193,8 @@ def register_handlers(
                 await old_message.delete()
 
         caption = _format_track(track)
+        # Record in play history so autoplay avoids repeating this song.
+        _record_played(chat_id, track.url)
         # Remember this chat's track URL so the blue bar button can link to it.
         _track_urls[chat_id] = track.url
         # Bar lives in the keyboard button — caption is track info only.
@@ -212,20 +234,49 @@ def register_handlers(
         with contextlib.suppress(Exception):
             await bot.send_message(chat_id, "✅ Queue finished, left the voice chat.")
 
+    async def _silent_autoplay_fetch(chat_id: int, last_track: Track) -> Track | None:
+        """Background prefetch: silently fetch next autoplay track while current
+        song plays. No Telegram messages — called early so the track is ready
+        the moment the current song ends."""
+        if not autoplayer.is_enabled(chat_id):
+            return None
+        _record_played(chat_id, last_track.url)
+        try:
+            info = await get_related_track(last_track.url, played_ids=_played_ids(chat_id))
+        except Exception:
+            return None
+        if not info:
+            return None
+        return Track(
+            title=info["title"],
+            url=info["url"],
+            stream_url=info["url"],
+            duration=info["duration"],
+            thumbnail=info["thumbnail"],
+            requested_by="🔄 Autoplay",
+            file_path=info["file_path"],
+        )
+
     async def _autoplay_next(chat_id: int, last_track: Track) -> Track | None:
-        """Called by the player when the queue empties. Fetches the next
-        related song via YouTube Radio Mix and returns a ready-to-stream Track,
-        or None if autoplay is disabled / no related track was found."""
+        """Fallback: called only when the silent prefetch missed or failed.
+        Shows a "fetching" message since there will be a visible wait."""
         if not autoplayer.is_enabled(chat_id):
             return None
 
-        with contextlib.suppress(Exception):
-            await bot.send_message(chat_id, "🔄 <b>Autoplay</b> — fetching next song…", parse_mode=enums.ParseMode.HTML)
-
+        notify_task = asyncio.create_task(
+            bot.send_message(chat_id, "🔄 <b>Autoplay</b> — finding next song…",
+                             parse_mode=enums.ParseMode.HTML)
+        )
+        _record_played(chat_id, last_track.url)
         try:
-            info = await get_related_track(last_track.url)
+            info = await get_related_track(last_track.url, played_ids=_played_ids(chat_id))
         except Exception:
             info = None
+
+        # Delete the "fetching" message as soon as we have a result
+        with contextlib.suppress(Exception):
+            msg = await notify_task
+            await msg.delete()
 
         if not info:
             with contextlib.suppress(Exception):
@@ -248,6 +299,7 @@ def register_handlers(
     player.on_track_start = _post_now_playing
     player.on_queue_empty = _post_queue_empty
     player.on_autoplay_next = _autoplay_next
+    player.on_autoplay_prefetch = _silent_autoplay_fetch
 
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
@@ -313,7 +365,8 @@ def register_handlers(
                 searching_msg = await bot.send_message(chat_id, "🔍")
 
             try:
-                info = await resolve_and_download(query[1])
+                # Fast path: stream directly — no download wait.
+                info = await resolve_stream_url(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:
