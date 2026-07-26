@@ -6,7 +6,7 @@ import logging
 from typing import Awaitable, Callable, Optional
 
 from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream, Update
+from pytgcalls.types import AudioQuality, MediaStream, Update
 from pytgcalls.types.stream import StreamEnded
 
 from queue_manager import QueueManager, Track
@@ -89,7 +89,13 @@ class VoiceChatPlayer:
         state = self.queues.state(chat_id)
         state.paused = False
         try:
-            await self.calls.play(chat_id, MediaStream(track.file_path))
+            await self.calls.play(
+                chat_id,
+                MediaStream(
+                    track.file_path,
+                    audio_parameters=AudioQuality.STUDIO,   # 96 kHz stereo input
+                ),
+            )
         except Exception:
             log.exception("Failed to join/play voice chat for %s", chat_id)
             raise

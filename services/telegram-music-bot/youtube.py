@@ -5,6 +5,7 @@ import asyncio
 import os
 import random
 import shutil
+import time
 import uuid
 
 import yt_dlp
@@ -14,58 +15,107 @@ from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Cookies file: authenticates with YouTube to bypass bot-check on cloud IPs.
-# Drop a Netscape-format cookies.txt here and it's picked up automatically.
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-# JS runtime: yt-dlp needs a JS runtime to solve YouTube's signature/n-challenges.
-# Only deno is enabled by default; explicitly pass bun (installed in this env).
-# Format expected by yt-dlp: "bun:/path/to/bun" or just "bun" if it's on PATH.
-def _js_runtimes_opt() -> dict:
-    """Return a js_runtimes dict for yt-dlp using the best available JS runtime.
-    Format: {runtime_name: {"path": "/path/to/binary"}}
-    """
+# ── JS runtime (computed once at startup) ────────────────────────────────────
+# yt-dlp needs a JS runtime to solve YouTube's signature/n-challenges.
+# Only deno is enabled by default; bun (installed here) must be passed
+# explicitly as {"runtime": {"path": "..."}}.
+
+def _compute_js_runtimes() -> dict:
     bun = shutil.which("bun")
     if bun:
         return {"bun": {"path": bun}}
     node = shutil.which("node")
     if node:
         return {"node": {"path": node}}
-    # Fall back to yt-dlp default (deno)
     return {"deno": {}}
+
+_JS_RUNTIMES: dict = _compute_js_runtimes()
 
 
 def _base_opts() -> dict:
-    opts: dict = {"js_runtimes": _js_runtimes_opt()}
+    opts: dict = {"js_runtimes": _JS_RUNTIMES}
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     return opts
 
 
-_SEARCH_OPTS = {
-    "format": "bestaudio/best",
+# ── Audio format ─────────────────────────────────────────────────────────────
+# Prefer 160 kbps Opus (YouTube's best audio-only stream), then any Opus,
+# then 128+ kbps anything, then whatever is available.
+_AUDIO_FORMAT = (
+    "bestaudio[acodec=opus][abr>=128]"
+    "/bestaudio[acodec=opus]"
+    "/bestaudio[abr>=128]"
+    "/bestaudio"
+)
+
+# ── Shared yt-dlp option blocks ───────────────────────────────────────────────
+_COMMON_OPTS: dict = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch1",
-    "skip_download": True,
-    **_base_opts(),
+    "noprogress": True,
+    "socket_timeout": 15,        # fail fast on stalled connections
+    "retries": 2,                # fewer retries = faster failure
+    "concurrent_fragment_downloads": 4,  # speed up DASH segment fetching
 }
 
-_DOWNLOAD_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
+_SEARCH_OPTS: dict = {
+    **_COMMON_OPTS,
     **_base_opts(),
+    "format": _AUDIO_FORMAT,
+    "default_search": "ytsearch1",
+    "skip_download": True,
+}
+
+_DOWNLOAD_OPTS: dict = {
+    **_COMMON_OPTS,
+    **_base_opts(),
+    "format": _AUDIO_FORMAT,
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",
             "preferredcodec": "opus",
-            "preferredquality": "192",
+            "preferredquality": "320",   # 320 kbps — maximum fidelity
         }
     ],
 }
 
+
+# ── TTL result cache ──────────────────────────────────────────────────────────
+# YouTube stream URLs are valid for ~6 h; we cache for 4 h.
+# Repeat plays of the same song are served instantly from cache.
+_CACHE_TTL = 4 * 3600      # seconds
+_CACHE_MAX = 200            # max entries before LRU eviction
+_cache: dict[str, tuple[float, dict]] = {}   # key -> (expires_monotonic, result)
+
+
+def _ck(query: str) -> str:
+    """Normalised cache key."""
+    return query.strip().lower()
+
+
+def _cache_get(key: str) -> dict | None:
+    entry = _cache.get(key)
+    if not entry:
+        return None
+    expires, result = entry
+    if time.monotonic() > expires:
+        _cache.pop(key, None)
+        return None
+    return result
+
+
+def _cache_set(key: str, result: dict) -> None:
+    if len(_cache) >= _CACHE_MAX:
+        oldest = min(_cache, key=lambda k: _cache[k][0])
+        _cache.pop(oldest, None)
+    _cache[key] = (time.monotonic() + _CACHE_TTL, result)
+
+
+# ── Exceptions ────────────────────────────────────────────────────────────────
 
 class TrackNotFound(Exception):
     pass
@@ -74,6 +124,8 @@ class TrackNotFound(Exception):
 class TrackTooLong(Exception):
     pass
 
+
+# ── Sync helpers (run in thread executor) ─────────────────────────────────────
 
 def _extract_info_sync(query: str) -> dict:
     with yt_dlp.YoutubeDL(_SEARCH_OPTS) as ydl:
@@ -95,7 +147,7 @@ def _download_sync(video_url: str, out_id: str) -> str:
         ydl.extract_info(video_url, download=True)
     final_path = os.path.join(DOWNLOAD_DIR, f"{out_id}.opus")
     if not os.path.exists(final_path):
-        # yt-dlp may keep the original extension if postprocessing didn't run.
+        # yt-dlp may keep the original extension when postprocessing skipped.
         for fname in os.listdir(DOWNLOAD_DIR):
             if fname.startswith(out_id):
                 return os.path.join(DOWNLOAD_DIR, fname)
@@ -103,17 +155,24 @@ def _download_sync(video_url: str, out_id: str) -> str:
     return final_path
 
 
-async def resolve_stream_url(query: str) -> dict:
-    """Fast path: resolve a YouTube search/URL and return the direct audio
-    stream URL — no download, no disk I/O.  Typically 3–6 s vs 15–30 s for
-    a full download.  pytgcalls feeds the URL straight to ffmpeg.
+# ── Public async API ──────────────────────────────────────────────────────────
 
-    Falls back to resolve_and_download on repeated failures.
+async def resolve_stream_url(query: str) -> dict:
+    """Fast path: resolve a YouTube search/URL to a direct audio stream URL.
+
+    Cached for 4 h — repeat requests for the same query are instant.
+    Falls back to a fresh extraction on cache miss.
+    py-tgcalls feeds the URL directly to ffmpeg (no disk I/O needed).
     """
+    key = _ck(query)
+    cached = _cache_get(key)
+    if cached:
+        return cached
+
     loop = asyncio.get_running_loop()
     last_exc: Exception | None = None
 
-    for attempt in range(3):
+    for attempt in range(2):
         if attempt:
             await asyncio.sleep(1)
         try:
@@ -125,17 +184,19 @@ async def resolve_stream_url(query: str) -> dict:
                     f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit"
                 )
 
-            # info["url"] is the direct audio stream URL (bestaudio format).
             stream_url = info.get("url") or info.get("webpage_url") or query
-            video_url = info.get("webpage_url") or info.get("original_url") or stream_url
+            video_url  = info.get("webpage_url") or info.get("original_url") or stream_url
 
-            return {
-                "title": info.get("title") or "Unknown title",
-                "url": video_url,          # YouTube watch page
-                "duration": duration,
+            result = {
+                "title":     info.get("title") or "Unknown title",
+                "url":       video_url,
+                "duration":  duration,
                 "thumbnail": info.get("thumbnail"),
                 "file_path": stream_url,   # direct audio stream → MediaStream(url)
             }
+            _cache_set(key, result)
+            return result
+
         except (TrackNotFound, TrackTooLong):
             raise
         except Exception as exc:
@@ -146,13 +207,13 @@ async def resolve_stream_url(query: str) -> dict:
 
 
 async def resolve_and_download(query: str) -> dict:
-    """Full download to disk (kept for playlist pre-loading).
+    """Full download to disk — used for playlist pre-loading and autoplay prefetch.
     Prefer resolve_stream_url for interactive /play commands.
     """
     loop = asyncio.get_running_loop()
     last_exc: Exception | None = None
 
-    for attempt in range(3):
+    for attempt in range(2):
         if attempt:
             await asyncio.sleep(2)
         try:
@@ -163,13 +224,13 @@ async def resolve_and_download(query: str) -> dict:
                 raise TrackTooLong(f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit")
 
             video_url = info.get("webpage_url") or info.get("url") or query
-            out_id = uuid.uuid4().hex
+            out_id    = uuid.uuid4().hex
             file_path = await loop.run_in_executor(None, _download_sync, video_url, out_id)
 
             return {
-                "title": info.get("title") or "Unknown title",
-                "url": video_url,
-                "duration": duration,
+                "title":     info.get("title") or "Unknown title",
+                "url":       video_url,
+                "duration":  duration,
                 "thumbnail": info.get("thumbnail"),
                 "file_path": file_path,
             }
@@ -183,10 +244,8 @@ async def resolve_and_download(query: str) -> dict:
 
 
 async def fetch_playlist_entries(url: str, max_tracks: int = 50) -> list[dict]:
-    """Return a list of flat playlist entry dicts (id, title, url) without
-    downloading audio. Fast — uses yt-dlp extract_flat mode.
-
-    Caps at *max_tracks* entries. Raises ValueError for non-playlist URLs.
+    """Return flat playlist entry dicts (id, title, url) without downloading.
+    Fast — uses yt-dlp extract_flat mode.
     """
     loop = asyncio.get_running_loop()
 
@@ -194,6 +253,7 @@ async def fetch_playlist_entries(url: str, max_tracks: int = 50) -> list[dict]:
         opts = {
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "extract_flat": True,
             "playlistend": max_tracks,
             **_base_opts(),
@@ -207,19 +267,19 @@ async def fetch_playlist_entries(url: str, max_tracks: int = 50) -> list[dict]:
         for e in entries:
             if not e or not e.get("id"):
                 continue
-            vid_url = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e['id']}"
-            results.append({
-                "id": e["id"],
-                "title": e.get("title") or "Unknown",
-                "url": vid_url,
-            })
+            vid_url = (
+                e.get("url")
+                or e.get("webpage_url")
+                or f"https://www.youtube.com/watch?v={e['id']}"
+            )
+            results.append({"id": e["id"], "title": e.get("title") or "Unknown", "url": vid_url})
         return results[:max_tracks]
 
     return await loop.run_in_executor(None, _sync)
 
 
 def cleanup_file(file_path: str) -> None:
-    """Delete a downloaded audio file.  Skips HTTP stream URLs (nothing to delete)."""
+    """Delete a downloaded audio file. Skips HTTP stream URLs (nothing to delete)."""
     try:
         if file_path and not file_path.startswith("http") and os.path.exists(file_path):
             os.remove(file_path)
@@ -227,9 +287,7 @@ def cleanup_file(file_path: str) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Autoplay: YouTube Radio Mix
-# ---------------------------------------------------------------------------
+# ── Autoplay: YouTube Radio Mix ───────────────────────────────────────────────
 
 import re as _re
 
@@ -243,16 +301,16 @@ def _extract_video_id(url: str) -> str | None:
 def _get_radio_mix_entry_sync(
     video_id: str, played_ids: frozenset[str] = frozenset()
 ) -> dict | None:
-    """Fetch candidates from the YouTube Radio Mix for *video_id* and return
-    one, preferring tracks not in *played_ids* (recent history) and picking
-    randomly among the top results so autoplay feels varied.
+    """Fetch candidates from the YouTube Radio Mix and return one at random,
+    preferring tracks not in played_ids (recent history).
     """
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
     opts = {
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "extract_flat": True,
-        "playlistend": 15,          # fetch more candidates for variety
+        "playlistend": 15,
         **_base_opts(),
     }
     try:
@@ -265,14 +323,11 @@ def _get_radio_mix_entry_sync(
         return None
 
     all_entries = [e for e in info["entries"] if e and e.get("id") and e["id"] != video_id]
-
-    # Prefer entries not in recent-play history
     fresh = [e for e in all_entries if e["id"] not in played_ids]
-    pool = fresh if fresh else all_entries   # fallback: allow repeats if nothing fresh
+    pool  = fresh if fresh else all_entries
     if not pool:
         return None
 
-    # Pick randomly from up to the first 8 candidates so each listen is different
     return random.choice(pool[:8])
 
 
@@ -281,16 +336,14 @@ async def get_related_track(
 ) -> dict | None:
     """Return a ready-to-stream track dict for the next autoplay song.
 
-    Uses the YouTube Radio Mix seeded on the last-played video.  Prefers
-    tracks not in *played_ids* and uses the fast stream-URL path so autoplay
-    transitions are near-instant.
-    Returns None if no related track can be found.
+    Uses the YouTube Radio Mix seeded on the last-played video.
+    Stream-URL path — transitions are near-instant.
     """
     video_id = _extract_video_id(last_url)
     if not video_id:
         return None
 
-    loop = asyncio.get_running_loop()
+    loop  = asyncio.get_running_loop()
     entry = await loop.run_in_executor(
         None, _get_radio_mix_entry_sync, video_id, played_ids
     )
@@ -299,6 +352,7 @@ async def get_related_track(
 
     related_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}"
     try:
-        return await resolve_and_download(related_url)
+        # Use fast stream-URL path for instant autoplay transitions
+        return await resolve_stream_url(related_url)
     except Exception:
         return None
