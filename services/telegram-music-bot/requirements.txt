@@ -1,0 +1,7 @@
+pyrofork
+tgcrypto
+py-tgcalls[pyrofork]
+yt-dlp
+yt-dlp-ejs
+aiohttp
+python-dotenv
