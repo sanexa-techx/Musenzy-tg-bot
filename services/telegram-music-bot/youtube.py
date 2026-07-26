@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import shutil
 import uuid
 
 import yt_dlp
@@ -16,16 +17,25 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # Drop a Netscape-format cookies.txt here and it's picked up automatically.
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
-# JS runtime: yt-dlp needs a JS runtime to solve YouTube's signature/n-challenges
-# for DASH/bestaudio formats. Node 20 (present here) is below yt-dlp's minimum
-# of v22, but Bun 1.3.6 meets the requirement (>=1.2.11). Pass js_runtimes
-# explicitly — yt-dlp defaults to deno-only which is not installed here.
-# yt_dlp_ejs (Python package, installed via pip) provides the solver scripts.
-_JS_RUNTIMES = {"bun": {}}
+# JS runtime: yt-dlp needs a JS runtime to solve YouTube's signature/n-challenges.
+# Only deno is enabled by default; explicitly pass bun (installed in this env).
+# Format expected by yt-dlp: "bun:/path/to/bun" or just "bun" if it's on PATH.
+def _js_runtimes_opt() -> dict:
+    """Return a js_runtimes dict for yt-dlp using the best available JS runtime.
+    Format: {runtime_name: {"path": "/path/to/binary"}}
+    """
+    bun = shutil.which("bun")
+    if bun:
+        return {"bun": {"path": bun}}
+    node = shutil.which("node")
+    if node:
+        return {"node": {"path": node}}
+    # Fall back to yt-dlp default (deno)
+    return {"deno": {}}
 
 
 def _base_opts() -> dict:
-    opts: dict = {"js_runtimes": _JS_RUNTIMES}
+    opts: dict = {"js_runtimes": _js_runtimes_opt()}
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     return opts

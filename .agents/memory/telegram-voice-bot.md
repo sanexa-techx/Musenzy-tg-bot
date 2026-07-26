@@ -39,6 +39,21 @@ Avoid asking users to copy-paste session strings — they frequently truncate or
 - `TELEGRAM_BOT_TOKEN` — from @BotFather (can expire; get a fresh one if `ACCESS_TOKEN_EXPIRED`)
 - `TELEGRAM_SESSION_STRING` — generated once via the workflow method above
 
+## yt-dlp EJS JS runtime configuration (bun on Replit)
+
+yt-dlp defaults to deno for JS challenge solving (signature + n-parameter), but only bun is available on Replit. Without a working JS runtime, all audio formats are missing and only storyboard/image formats survive.
+
+**Fix:** Pass `js_runtimes` as a dict with an explicit path:
+```python
+import shutil
+bun = shutil.which("bun")
+opts["js_runtimes"] = {"bun": {"path": bun}}  # NOT a string — must be dict
+```
+
+**Why:** The `js_runtimes` option takes `{runtime_name: {"path": "..."}}`. Passing a string raises `ValueError: Invalid js_runtimes format, expected a dict of {runtime: {config}}`. The path key inside the config dict is what tells yt-dlp where to find the binary (useful when bun is in the Nix store, not a standard PATH location).
+
+**Also:** With a logged-in cookies file where YouTube's SABR experiment is active on that account, the `web_safari` client returns storyboard-only formats too. The JS runtime fix unlocks the web client's DASH audio streams for non-SABR accounts.
+
 ## Session file priority (config.py pattern)
 ```python
 def _get_session():
