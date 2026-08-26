@@ -62,6 +62,14 @@ The `TELEGRAM_SESSION_STRING` environment secret is authoritative when present; 
 
 **How to apply:** After rotating the assistant session, update the Replit Secret and Render environment variable. Restart the bot so the process reloads the value.
 
+## YouTube cookies can expire or be rejected by the server IP
+
+When yt-dlp reports `Sign in to confirm you're not a bot` across all player clients, upgrading yt-dlp or changing the JS runtime will not fix it; the cookies need to be freshly exported from a logged-in browser and supplied to the running environment.
+
+**Why:** YouTube may reject older browser cookies or a cloud provider IP even when Telegram authentication is healthy.
+
+**How to apply:** Keep the local cookies file out of deployment configuration where possible. For Render, set `YOUTUBE_COOKIES_B64` from a fresh Netscape cookie export; for Replit, restart after replacing the local file or secret.
+
 ## Session file fallback (config.py pattern)
 ```python
 def _get_session():
