@@ -34,8 +34,13 @@ BOT_TOKEN = _optional("TELEGRAM_BOT_TOKEN")
 # is actually set before starting the bot.
 def _get_session() -> str | None:
     """Read session from a local file written by generate_session_interactive.py
-    (preferred, avoids copy-paste corruption), then fall back to the
-    TELEGRAM_SESSION_STRING env var / Replit Secret."""
+    (preferred on Replit, avoids copy-paste corruption), then fall back to the
+    TELEGRAM_SESSION_STRING env var / Replit Secret. Render must use its
+    environment value because the container filesystem is rebuilt on deploy."""
+    env_value = os.environ.get("TELEGRAM_SESSION_STRING") or None
+    if os.environ.get("RENDER") and env_value:
+        return env_value
+
     local = os.path.join(
         os.path.dirname(__file__), ".session_tmp", "session_string.txt"
     )
@@ -43,7 +48,7 @@ def _get_session() -> str | None:
         val = open(local).read().strip()
         if val:
             return val
-    return os.environ.get("TELEGRAM_SESSION_STRING") or None
+    return env_value
 
 ASSISTANT_SESSION = _get_session()
 

@@ -36,7 +36,9 @@ _JS_RUNTIMES: dict = _compute_js_runtimes()
 
 def _base_opts() -> dict:
     opts: dict = {"js_runtimes": _JS_RUNTIMES}
-    if os.path.exists(COOKIES_FILE):
+    # On Render, main.py writes this file from YOUTUBE_COOKIES_B64 after
+    # imports have completed. Include the path now so yt-dlp sees it later.
+    if os.path.exists(COOKIES_FILE) or os.environ.get("YOUTUBE_COOKIES_B64"):
         opts["cookiefile"] = COOKIES_FILE
     return opts
 
