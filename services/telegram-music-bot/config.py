@@ -33,12 +33,13 @@ BOT_TOKEN = _optional("TELEGRAM_BOT_TOKEN")
 # API_ID/API_HASH) can run before this value exists. main.py enforces that it
 # is actually set before starting the bot.
 def _get_session() -> str | None:
-    """Read session from a local file written by generate_session_interactive.py
-    (preferred on Replit, avoids copy-paste corruption), then fall back to the
-    TELEGRAM_SESSION_STRING env var / Replit Secret. Render must use its
-    environment value because the container filesystem is rebuilt on deploy."""
+    """Read the configured session string.
+
+    The environment secret is authoritative so a revoked or stale local
+    session cannot override a newly supplied Replit/Render secret.
+    """
     env_value = os.environ.get("TELEGRAM_SESSION_STRING") or None
-    if os.environ.get("RENDER") and env_value:
+    if env_value:
         return env_value
 
     local = os.path.join(

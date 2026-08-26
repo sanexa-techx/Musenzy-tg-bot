@@ -54,7 +54,15 @@ opts["js_runtimes"] = {"bun": {"path": bun}}  # NOT a string — must be dict
 
 **Also:** With a logged-in cookies file where YouTube's SABR experiment is active on that account, the `web_safari` client returns storyboard-only formats too. The JS runtime fix unlocks the web client's DASH audio streams for non-SABR accounts.
 
-## Session file priority (config.py pattern)
+## Session source priority
+
+The `TELEGRAM_SESSION_STRING` environment secret is authoritative when present; only use the local `.session_tmp/session_string.txt` fallback when no environment value exists.
+
+**Why:** Telegram can revoke an old exported session. A stale local file must not override a newly rotated Replit or Render secret.
+
+**How to apply:** After rotating the assistant session, update the Replit Secret and Render environment variable. Restart the bot so the process reloads the value.
+
+## Session file fallback (config.py pattern)
 ```python
 def _get_session():
     local = os.path.join(os.path.dirname(__file__), ".session_tmp", "session_string.txt")
