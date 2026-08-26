@@ -29,7 +29,7 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = ".venv/bin/python services/telegram-music-bot/main.py"
+args = ".pythonlibs/bin/python services/telegram-music-bot/main.py"
 
 [agent]
 stack = "PNPM_WORKSPACE"

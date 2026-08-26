@@ -127,11 +127,32 @@ class TrackTooLong(Exception):
     pass
 
 
+class YouTubeBlocked(Exception):
+    """YouTube rejected the request because authentication/anti-bot checks failed."""
+
+
 # ── Sync helpers (run in thread executor) ─────────────────────────────────────
 
 def _extract_info_sync(query: str) -> dict:
-    with yt_dlp.YoutubeDL(_SEARCH_OPTS) as ydl:
-        info = ydl.extract_info(query, download=False)
+    try:
+        with yt_dlp.YoutubeDL(_SEARCH_OPTS) as ydl:
+            info = ydl.extract_info(query, download=False)
+    except yt_dlp.utils.DownloadError as exc:
+        message = str(exc).lower()
+        if any(
+            phrase in message
+            for phrase in (
+                "sign in to confirm",
+                "not a bot",
+                "confirm you're not a bot",
+                "confirm you’re not a bot",
+                "use --cookies",
+            )
+        ):
+            raise YouTubeBlocked(
+                "YouTube rejected this server. A fresh YouTube cookies export is required."
+            ) from exc
+        raise
     if not info:
         raise TrackNotFound(query)
     if "entries" in info:

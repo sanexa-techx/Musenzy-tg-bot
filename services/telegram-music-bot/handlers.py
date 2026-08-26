@@ -20,7 +20,7 @@ from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
 from youtube import (
-    TrackNotFound, TrackTooLong,
+    TrackNotFound, TrackTooLong, YouTubeBlocked,
     fetch_playlist_entries, get_related_track,
     resolve_and_download, resolve_stream_url,
     _extract_video_id,
@@ -365,7 +365,10 @@ def register_handlers(
                 searching_msg = await bot.send_message(chat_id, "🔍")
 
             try:
-                info = await resolve_and_download(query[1])
+                # Resolve the direct audio URL instead of downloading and
+                # re-encoding the whole track. This makes /play start much
+                # faster while preserving YouTube's original best audio.
+                info = await resolve_stream_url(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:
@@ -378,12 +381,28 @@ def register_handlers(
                         await searching_msg.delete()
                 asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that track."))
                 return
+            except YouTubeBlocked:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+                asyncio.create_task(
+                    _send_and_delete(
+                        chat_id,
+                        bot,
+                        "❌ YouTube blocked this server. Please refresh the YouTube cookies in "
+                        "YOUTUBE_COOKIES_B64, then restart the bot.",
+                    )
+                )
+                return
             except Exception:
                 with contextlib.suppress(Exception):
                     if searching_msg:
                         await searching_msg.delete()
-                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Something went wrong fetching that track."))
-                raise
+                log.exception("Failed to resolve track for chat %s", chat_id)
+                asyncio.create_task(
+                    _send_and_delete(chat_id, bot, "❌ Could not fetch that track right now.")
+                )
+                return
             finally:
                 with contextlib.suppress(Exception):
                     if searching_msg:
