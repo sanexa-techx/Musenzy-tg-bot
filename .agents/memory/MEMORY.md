@@ -1,2 +1,3 @@
 - [Telegram voice-chat music bots (py-tgcalls)](telegram-voice-bot.md) — use pyrofork not pyrogram; generate MTProto session strings via a workflow, not ShellExec background/nohup.
 - [Telegram button styles](telegram-button-styles.md) — use Bot API JSON for 9.4 styles when Pyrofork lacks the `style` field; keep a Pyrofork fallback.
+- [Imported workspace setup](imported-workspace-setup.md) — imported monorepos may need a clean generated Python environment and a lockfile-based pnpm install before workflows start.
