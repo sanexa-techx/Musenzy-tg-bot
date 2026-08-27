@@ -12,9 +12,15 @@ from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlrea
 from pyrogram.types import CallbackQuery, Message
 
 from autoplay import AutoplayManager
+from bot_api import BotApiClient, BotApiError
 from broadcast import BroadcastManager
-from config import LOGO_PATH, OWNER_ID
-from keyboards import broadcast_schedule_menu, player_controls, welcome_menu
+from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
+from keyboards import (
+    broadcast_schedule_menu,
+    player_controls,
+    player_controls_api,
+    welcome_menu,
+)
 from player import VoiceChatPlayer
 from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker
@@ -150,6 +156,7 @@ def register_handlers(
     playlists: PlaylistManager,
 ) -> None:
     tracker = NowPlayingTracker()
+    bot_api = BotApiClient(BOT_TOKEN or "")
 
     # Per-chat locks: prevent two concurrent /play downloads in the same chat.
     _chat_locks: dict[int, asyncio.Lock] = {}
@@ -177,7 +184,7 @@ def register_handlers(
         paused = queues.state(chat_id).paused
         if elapsed == 0 and duration == 0:
             elapsed, duration = tracker.current_elapsed(chat_id)
-        return player_controls(
+        return player_controls_api(
             paused=paused, elapsed=elapsed, duration=duration,
             track_url=_track_urls.get(chat_id, ""),
         )
@@ -198,30 +205,84 @@ def register_handlers(
         # Remember this chat's track URL so the blue bar button can link to it.
         _track_urls[chat_id] = track.url
         # Bar lives in the keyboard button — caption is track info only.
-        initial_markup = player_controls(paused=False, elapsed=0, duration=track.duration, track_url=track.url)
+        initial_markup = player_controls_api(
+            paused=False,
+            elapsed=0,
+            duration=track.duration,
+            track_url=track.url,
+        )
         try:
             if track.thumbnail:
                 try:
-                    message = await bot.send_photo(
-                        chat_id, track.thumbnail, caption=caption,
+                    message = await bot_api.send_photo(
+                        chat_id,
+                        track.thumbnail,
+                        caption,
                         reply_markup=initial_markup,
-                        parse_mode=enums.ParseMode.HTML,
                     )
-                except FloodWait as e:
-                    log.warning("FloodWait %ds on send_photo for chat %s — falling back to text", e.value, chat_id)
-                    await asyncio.sleep(min(e.value, 10))
-                    message = await bot.send_message(
-                        chat_id, caption, reply_markup=initial_markup,
-                        parse_mode=enums.ParseMode.HTML,
+                except BotApiError:
+                    log.warning(
+                        "Could not send thumbnail through Bot API for chat %s; "
+                        "falling back to styled text",
+                        chat_id,
+                    )
+                    message = await bot_api.send_message(
+                        chat_id,
+                        caption,
+                        reply_markup=initial_markup,
                     )
             else:
-                message = await bot.send_message(
-                    chat_id, caption, reply_markup=initial_markup,
-                    parse_mode=enums.ParseMode.HTML,
+                message = await bot_api.send_message(
+                    chat_id,
+                    caption,
+                    reply_markup=initial_markup,
                 )
         except Exception:
-            log.exception("Failed to post now-playing message for chat %s", chat_id)
-            return
+            # Keep playback usable if Telegram temporarily rejects the new
+            # Bot API field or the HTTP API is unavailable.
+            log.exception(
+                "Styled now-playing post failed for chat %s; using Pyrofork fallback",
+                chat_id,
+            )
+            try:
+                fallback_markup = player_controls(
+                    paused=False,
+                    elapsed=0,
+                    duration=track.duration,
+                    track_url=track.url,
+                )
+                if track.thumbnail:
+                    try:
+                        message = await bot.send_photo(
+                            chat_id,
+                            track.thumbnail,
+                            caption=caption,
+                            reply_markup=fallback_markup,
+                            parse_mode=enums.ParseMode.HTML,
+                        )
+                    except FloodWait as e:
+                        log.warning(
+                            "FloodWait %ds on send_photo for chat %s — falling back to text",
+                            e.value,
+                            chat_id,
+                        )
+                        await asyncio.sleep(min(e.value, 10))
+                        message = await bot.send_message(
+                            chat_id,
+                            caption,
+                            reply_markup=fallback_markup,
+                            parse_mode=enums.ParseMode.HTML,
+                        )
+                else:
+                    message = await bot.send_message(
+                        chat_id,
+                        caption,
+                        reply_markup=fallback_markup,
+                        parse_mode=enums.ParseMode.HTML,
+                    )
+            except Exception:
+                log.exception("Failed to post now-playing message for chat %s", chat_id)
+                return
         tracker.start(
             chat_id, message, track.duration, caption,
             lambda e, d, p, cid=chat_id: _controls(cid, e, d),
@@ -779,7 +840,21 @@ def register_handlers(
                     await query.answer("Paused")
             with contextlib.suppress(Exception):
                 if query.message.reply_markup:
-                    await query.message.edit_reply_markup(player_controls(paused=state.paused))
+                    try:
+                        await bot_api.call(
+                            "editMessageReplyMarkup",
+                            {
+                                "chat_id": chat_id,
+                                "message_id": query.message.id,
+                                "reply_markup": _controls(chat_id),
+                            },
+                        )
+                    except Exception:
+                        # Messages sent before the Bot API transport was
+                        # available are still editable through Pyrofork.
+                        await query.message.edit_reply_markup(
+                            player_controls(paused=state.paused)
+                        )
         elif action == "skip":
             await player.play_next(chat_id)
             with contextlib.suppress(Exception):

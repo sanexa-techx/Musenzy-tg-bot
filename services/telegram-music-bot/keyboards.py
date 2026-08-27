@@ -73,3 +73,57 @@ def player_controls(
             ],
         ]
     )
+
+
+def player_controls_api(
+    paused: bool,
+    elapsed: int = 0,
+    duration: int = 0,
+    track_url: str = "",
+) -> dict:
+    """Bot API 9.4 keyboard with actual button background styles.
+
+    ``primary`` is blue, ``success`` is green, and ``danger`` is red.
+    This is a JSON payload because the installed Pyrofork model predates the
+    Bot API 9.4 ``style`` property.
+    """
+    bar_label = render_bar_button(elapsed, duration, paused)
+    bar_url = track_url if track_url else _FALLBACK_URL
+
+    def button(
+        text: str,
+        *,
+        style: str,
+        callback_data: str | None = None,
+        url: str | None = None,
+    ) -> dict:
+        item = {"text": text, "style": style}
+        if callback_data is not None:
+            item["callback_data"] = callback_data
+        if url is not None:
+            item["url"] = url
+        return item
+
+    return {
+        "inline_keyboard": [
+            [button(bar_label, style="primary", url=bar_url)],
+            [
+                button(
+                    "▶️" if paused else "⏸",
+                    style="success",
+                    callback_data="ctl:pauseresume",
+                ),
+                button("⏭", style="primary", callback_data="ctl:skip"),
+                button("⏹", style="danger", callback_data="ctl:stop"),
+                button("🎵", style="primary", callback_data="ctl:queue"),
+                button("✖️", style="danger", callback_data="ctl:close"),
+            ],
+            [
+                button(
+                    "🔵 Add Playlist+",
+                    style="primary",
+                    callback_data="ctl:addplaylist",
+                ),
+            ],
+        ]
+    }

@@ -46,6 +46,9 @@ class VoiceChatPlayer:
         # Per-chat locks: py-tgcalls can fire StreamEnded more than once for
         # the same track; the lock ensures only the first event is processed.
         self._stream_end_locks: dict[int, asyncio.Lock] = {}
+        # Manual skip and StreamEnded can arrive at the same time. Serialize
+        # queue advancement separately from the duplicate-event guard above.
+        self._advance_locks: dict[int, asyncio.Lock] = {}
         # Background prefetch state
         self._prefetch_tasks: dict[int, asyncio.Task] = {}
         self._prefetch_result: dict[int, Optional["Track"]] = {}
@@ -110,6 +113,11 @@ class VoiceChatPlayer:
             )
 
     async def play_next(self, chat_id: int) -> Track | None:
+        lock = self._advance_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            return await self._play_next_locked(chat_id)
+
+    async def _play_next_locked(self, chat_id: int) -> Track | None:
         # Save the current track before next_track() clears it — autoplay needs it.
         last_track = self.queues.state(chat_id).current
         nxt = self.queues.next_track(chat_id)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import shutil
@@ -11,6 +12,8 @@ import uuid
 import yt_dlp
 
 from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
+
+log = logging.getLogger("youtube")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -290,11 +293,9 @@ async def fetch_playlist_entries(url: str, max_tracks: int = 50) -> list[dict]:
         for e in entries:
             if not e or not e.get("id"):
                 continue
-            vid_url = (
-                e.get("url")
-                or e.get("webpage_url")
-                or f"https://www.youtube.com/watch?v={e['id']}"
-            )
+            vid_url = _entry_watch_url(e)
+            if not vid_url:
+                continue
             results.append({"id": e["id"], "title": e.get("title") or "Unknown", "url": vid_url})
         return results[:max_tracks]
 
@@ -321,11 +322,29 @@ def _extract_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _get_radio_mix_entry_sync(
+def _entry_watch_url(entry: dict) -> str | None:
+    """Normalize yt-dlp flat-playlist entries to a usable watch URL.
+
+    In extract_flat mode yt-dlp can put a bare video ID in ``url``. Passing
+    that value back to another extractor causes autoplay to fail immediately.
+    """
+    for value in (entry.get("webpage_url"), entry.get("url")):
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    video_id = entry.get("id")
+    if isinstance(video_id, str) and video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return None
+
+
+def _get_radio_mix_entries_sync(
     video_id: str, played_ids: frozenset[str] = frozenset()
-) -> dict | None:
-    """Fetch candidates from the YouTube Radio Mix and return one at random,
-    preferring tracks not in played_ids (recent history).
+) -> list[dict]:
+    """Fetch several usable candidates from YouTube's Radio Mix.
+
+    Keeping multiple candidates lets the async resolver skip a blocked,
+    removed, or otherwise unplayable recommendation instead of ending
+    autoplay after the first bad result.
     """
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
     opts = {
@@ -340,18 +359,33 @@ def _get_radio_mix_entry_sync(
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(mix_url, download=False)
     except Exception:
-        return None
+        return []
 
     if not info or "entries" not in info:
-        return None
+        return []
 
-    all_entries = [e for e in info["entries"] if e and e.get("id") and e["id"] != video_id]
-    fresh = [e for e in all_entries if e["id"] not in played_ids]
-    pool  = fresh if fresh else all_entries
-    if not pool:
-        return None
+    all_entries = []
+    for entry in info["entries"]:
+        if not entry or not entry.get("id") or entry["id"] == video_id:
+            continue
+        duration = int(entry.get("duration") or 0)
+        title = str(entry.get("title") or "")
+        if duration and (
+            duration < 30
+            or duration > MAX_TRACK_SECONDS
+        ):
+            continue
+        if "#short" in title.lower() or "/shorts/" in str(entry.get("webpage_url") or ""):
+            continue
+        if not _entry_watch_url(entry):
+            continue
+        all_entries.append(entry)
 
-    return random.choice(pool[:8])
+    fresh = [entry for entry in all_entries if entry["id"] not in played_ids]
+    pool = fresh if fresh else all_entries
+    random.shuffle(pool)
+    return pool[:8]
+
 
 
 async def get_related_track(
@@ -367,15 +401,22 @@ async def get_related_track(
         return None
 
     loop  = asyncio.get_running_loop()
-    entry = await loop.run_in_executor(
-        None, _get_radio_mix_entry_sync, video_id, played_ids
+    entries = await loop.run_in_executor(
+        None, _get_radio_mix_entries_sync, video_id, played_ids
     )
-    if not entry:
-        return None
-
-    related_url = entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}"
-    try:
-        # Use fast stream-URL path for instant autoplay transitions
-        return await resolve_stream_url(related_url)
-    except Exception:
-        return None
+    for entry in entries:
+        related_url = _entry_watch_url(entry)
+        if not related_url:
+            continue
+        try:
+            # Use fast stream-URL path for instant autoplay transitions.
+            return await resolve_stream_url(related_url)
+        except (TrackNotFound, TrackTooLong):
+            log.debug("Skipping unusable autoplay recommendation %s", entry.get("id"))
+        except Exception:
+            log.debug(
+                "Autoplay recommendation %s could not be resolved",
+                entry.get("id"),
+                exc_info=True,
+            )
+    return None
