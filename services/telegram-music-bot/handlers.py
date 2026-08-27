@@ -164,24 +164,23 @@ def register_handlers(
     # Background playlist-loading tasks per chat (cancelled on /stop).
     _playlist_tasks: dict[int, asyncio.Task] = {}
 
-    # Autoplay repeat protection: a song cannot return until five later tracks
-    # have started. Keep this separate from the mood seeds below because the
-    # repeat window is a hard user-facing rule.
-    _played_history: dict[int, collections.deque] = {}
+    # Autoplay repeat protection: no YouTube video may be selected twice during
+    # one active autoplay session. This is intentionally a set, not a rolling
+    # window, because the user wants new songs rather than repeats after 4/5.
+    _played_history: dict[int, set[str]] = {}
     _mood_history: dict[int, collections.deque] = {}
+
+    def _track_key(url: str) -> str:
+        return _extract_video_id(url) or url.strip().lower()
 
     def _record_played(chat_id: int, track: Track) -> None:
         """Record a started track for cooldown and recommendation mood."""
-        vid = _extract_video_id(track.url)
-        if vid:
-            hist = _played_history.setdefault(chat_id, collections.deque(maxlen=5))
-            # Do not let duplicate callback deliveries consume cooldown slots.
-            if not hist or hist[-1] != vid:
-                hist.append(vid)
+        key = _track_key(track.url)
+        _played_history.setdefault(chat_id, set()).add(key)
 
         mood = _mood_history.setdefault(chat_id, collections.deque(maxlen=5))
         mood = collections.deque(
-            (item for item in mood if _extract_video_id(item.url) != vid),
+            (item for item in mood if _track_key(item.url) != key),
             maxlen=5,
         )
         mood.append(track)
@@ -189,6 +188,10 @@ def register_handlers(
 
     def _played_ids(chat_id: int) -> frozenset:
         return frozenset(_played_history.get(chat_id, []))
+
+    def _clear_autoplay_memory(chat_id: int) -> None:
+        _played_history.pop(chat_id, None)
+        _mood_history.pop(chat_id, None)
 
     def _mood_seed_urls(chat_id: int, current: Track) -> list[str]:
         """Return the current song plus the four most recent mood anchors."""
@@ -319,6 +322,7 @@ def register_handlers(
         """Fires once the queue runs out and the assistant has left the
         voice chat -- stops the progress tracker and lets everyone know."""
         tracker.stop(chat_id)
+        _clear_autoplay_memory(chat_id)
         with contextlib.suppress(Exception):
             await bot.send_message(chat_id, "✅ Queue finished, left the voice chat.")
 
@@ -573,6 +577,7 @@ def register_handlers(
             task.cancel()
         tracker.stop(message.chat.id)
         await player.stop(message.chat.id)
+        _clear_autoplay_memory(message.chat.id)
         await message.reply_text("Stopped and left the voice chat.")
 
     @bot.on_message(filters.command("queue") & filters.group)
@@ -810,10 +815,18 @@ def register_handlers(
         with contextlib.suppress(Exception):
             await message.delete()
 
-        autoplayer.enable(message.chat.id)
+        chat_id = message.chat.id
+        if not autoplayer.is_enabled(chat_id):
+            # Starting a new autoplay session gets a clean no-repeat set, but
+            # the currently playing song remains blocked if one is active.
+            _clear_autoplay_memory(chat_id)
+            current = queues.state(chat_id).current
+            if current:
+                _record_played(chat_id, current)
+        autoplayer.enable(chat_id)
 
         await bot.send_message(
-            message.chat.id,
+            chat_id,
             "🔄 <b>Autoplay enabled</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "When the queue ends I'll automatically play related songs "
@@ -830,6 +843,7 @@ def register_handlers(
             await message.delete()
 
         autoplayer.disable(message.chat.id)
+        _clear_autoplay_memory(message.chat.id)
 
         await bot.send_message(
             message.chat.id,

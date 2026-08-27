@@ -391,7 +391,8 @@ async def get_related_track(
 
     Uses YouTube Radio Mixes from the current and recent songs as mood seeds.
     Candidates are ranked by how often and how highly they appear across those
-    mixes. ``played_ids`` is a strict cooldown set; no fallback bypasses it.
+    mixes. ``played_ids`` is the active session's strict no-repeat set; no
+    fallback bypasses it.
     Stream-URL path — transitions are near-instant.
     """
     seed_urls = seed_urls or [last_url]
