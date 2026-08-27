@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: telegram-music-bot
+    runtime: docker
+    dockerfilePath: services/telegram-music-bot/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: false
+
+    envVars:
+      - key: PORT
+        value: "8000"
+
+      # ── Telegram credentials (set in Render dashboard → Environment) ─────────
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_SESSION_STRING
+        sync: false
+
+      # ── YouTube cookies (base64-encoded Netscape cookies.txt) ─────────────────
+      # Run: base64 -w0 cookies.txt  and paste the output here.
+      - key: YOUTUBE_COOKIES_B64
+        sync: false
+
+      # ── Optional ──────────────────────────────────────────────────────────────
+      - key: OWNER_ID
+        sync: false
+      - key: MAX_TRACK_SECONDS
+        value: "10800"
