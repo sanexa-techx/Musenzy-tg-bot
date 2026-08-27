@@ -337,14 +337,12 @@ def _entry_watch_url(entry: dict) -> str | None:
     return None
 
 
-def _get_radio_mix_entries_sync(
-    video_id: str, played_ids: frozenset[str] = frozenset()
-) -> list[dict]:
-    """Fetch several usable candidates from YouTube's Radio Mix.
+def _get_radio_mix_entries_sync(video_id: str) -> list[dict]:
+    """Fetch usable candidates from one YouTube Radio Mix.
 
-    Keeping multiple candidates lets the async resolver skip a blocked,
-    removed, or otherwise unplayable recommendation instead of ending
-    autoplay after the first bad result.
+    Keeping the source order lets the async resolver score candidates across
+    multiple mood seeds. A recommendation appearing in several mixes is a
+    stronger mood match than one appearing in only the current mix.
     """
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
     opts = {
@@ -352,7 +350,7 @@ def _get_radio_mix_entries_sync(
         "no_warnings": True,
         "noprogress": True,
         "extract_flat": True,
-        "playlistend": 15,
+        "playlistend": 25,
         **_base_opts(),
     }
     try:
@@ -381,30 +379,77 @@ def _get_radio_mix_entries_sync(
             continue
         all_entries.append(entry)
 
-    fresh = [entry for entry in all_entries if entry["id"] not in played_ids]
-    pool = fresh if fresh else all_entries
-    random.shuffle(pool)
-    return pool[:8]
-
+    return all_entries[:20]
 
 
 async def get_related_track(
-    last_url: str, played_ids: frozenset[str] = frozenset()
+    last_url: str,
+    played_ids: frozenset[str] = frozenset(),
+    seed_urls: list[str] | tuple[str, ...] | None = None,
 ) -> dict | None:
     """Return a ready-to-stream track dict for the next autoplay song.
 
-    Uses the YouTube Radio Mix seeded on the last-played video.
+    Uses YouTube Radio Mixes from the current and recent songs as mood seeds.
+    Candidates are ranked by how often and how highly they appear across those
+    mixes. ``played_ids`` is a strict cooldown set; no fallback bypasses it.
     Stream-URL path — transitions are near-instant.
     """
-    video_id = _extract_video_id(last_url)
-    if not video_id:
+    seed_urls = seed_urls or [last_url]
+    seed_ids: list[str] = []
+    seen_seed_ids: set[str] = set()
+    for url in [last_url, *seed_urls]:
+        video_id = _extract_video_id(url)
+        if video_id and video_id not in seen_seed_ids:
+            seen_seed_ids.add(video_id)
+            seed_ids.append(video_id)
+    if not seed_ids:
         return None
 
-    loop  = asyncio.get_running_loop()
-    entries = await loop.run_in_executor(
-        None, _get_radio_mix_entries_sync, video_id, played_ids
+    loop = asyncio.get_running_loop()
+    mix_results = await asyncio.gather(
+        *(
+            loop.run_in_executor(None, _get_radio_mix_entries_sync, video_id)
+            for video_id in seed_ids
+        ),
+        return_exceptions=True,
     )
-    for entry in entries:
+
+    # Score candidates by cross-seed agreement. The current song is first and
+    # therefore gets the highest weight; older songs still preserve the mood.
+    ranked: dict[str, tuple[dict, int]] = {}
+    for seed_index, entries in enumerate(mix_results):
+        if isinstance(entries, Exception):
+            log.debug(
+                "Mood seed %s recommendation lookup failed",
+                seed_ids[seed_index],
+                exc_info=entries,
+            )
+            continue
+        seed_weight = len(seed_ids) - seed_index
+        for position, entry in enumerate(entries):
+            candidate_id = entry.get("id")
+            if (
+                not candidate_id
+                or candidate_id in seed_ids
+                or candidate_id in played_ids
+            ):
+                continue
+            related_url = _entry_watch_url(entry)
+            if not related_url:
+                continue
+            # Repeated appearance across mixes dominates; source position is
+            # the tie-breaker so YouTube's strongest recommendations win.
+            score = seed_weight * 10 + max(0, 20 - position)
+            if candidate_id in ranked:
+                previous, previous_score = ranked[candidate_id]
+                ranked[candidate_id] = (previous, previous_score + score)
+            else:
+                ranked[candidate_id] = (entry, score)
+
+    candidates = list(ranked.values())
+    random.shuffle(candidates)
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    for entry, _score in candidates:
         related_url = _entry_watch_url(entry)
         if not related_url:
             continue

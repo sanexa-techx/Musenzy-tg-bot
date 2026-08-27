@@ -164,19 +164,46 @@ def register_handlers(
     # Background playlist-loading tasks per chat (cancelled on /stop).
     _playlist_tasks: dict[int, asyncio.Task] = {}
 
-    # Autoplay: per-chat deque of recently played YouTube video IDs (max 25).
-    # Used to avoid immediate repeats when choosing the next autoplay song.
+    # Autoplay repeat protection: a song cannot return until five later tracks
+    # have started. Keep this separate from the mood seeds below because the
+    # repeat window is a hard user-facing rule.
     _played_history: dict[int, collections.deque] = {}
+    _mood_history: dict[int, collections.deque] = {}
 
-    def _record_played(chat_id: int, url: str) -> None:
-        """Add a YouTube video ID to the per-chat play history."""
-        vid = _extract_video_id(url)
+    def _record_played(chat_id: int, track: Track) -> None:
+        """Record a started track for cooldown and recommendation mood."""
+        vid = _extract_video_id(track.url)
         if vid:
-            hist = _played_history.setdefault(chat_id, collections.deque(maxlen=25))
-            hist.append(vid)
+            hist = _played_history.setdefault(chat_id, collections.deque(maxlen=5))
+            # Do not let duplicate callback deliveries consume cooldown slots.
+            if not hist or hist[-1] != vid:
+                hist.append(vid)
+
+        mood = _mood_history.setdefault(chat_id, collections.deque(maxlen=5))
+        mood = collections.deque(
+            (item for item in mood if _extract_video_id(item.url) != vid),
+            maxlen=5,
+        )
+        mood.append(track)
+        _mood_history[chat_id] = mood
 
     def _played_ids(chat_id: int) -> frozenset:
         return frozenset(_played_history.get(chat_id, []))
+
+    def _mood_seed_urls(chat_id: int, current: Track) -> list[str]:
+        """Return the current song plus the four most recent mood anchors."""
+        urls: list[str] = []
+        seen: set[str] = set()
+        for track in [current, *reversed(_mood_history.get(chat_id, []))]:
+            video_id = _extract_video_id(track.url)
+            key = video_id or track.url
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(track.url)
+            if len(urls) == 5:
+                break
+        return urls
 
     _track_urls: dict[int, str] = {}
 
@@ -201,7 +228,7 @@ def register_handlers(
 
         caption = _format_track(track)
         # Record in play history so autoplay avoids repeating this song.
-        _record_played(chat_id, track.url)
+        _record_played(chat_id, track)
         # Remember this chat's track URL so the blue bar button can link to it.
         _track_urls[chat_id] = track.url
         # Bar lives in the keyboard button — caption is track info only.
@@ -301,9 +328,12 @@ def register_handlers(
         the moment the current song ends."""
         if not autoplayer.is_enabled(chat_id):
             return None
-        _record_played(chat_id, last_track.url)
         try:
-            info = await get_related_track(last_track.url, played_ids=_played_ids(chat_id))
+            info = await get_related_track(
+                last_track.url,
+                played_ids=_played_ids(chat_id),
+                seed_urls=_mood_seed_urls(chat_id, last_track),
+            )
         except Exception:
             return None
         if not info:
@@ -328,9 +358,12 @@ def register_handlers(
             bot.send_message(chat_id, "🔄 <b>Autoplay</b> — finding next song…",
                              parse_mode=enums.ParseMode.HTML)
         )
-        _record_played(chat_id, last_track.url)
         try:
-            info = await get_related_track(last_track.url, played_ids=_played_ids(chat_id))
+            info = await get_related_track(
+                last_track.url,
+                played_ids=_played_ids(chat_id),
+                seed_urls=_mood_seed_urls(chat_id, last_track),
+            )
         except Exception:
             info = None
 
