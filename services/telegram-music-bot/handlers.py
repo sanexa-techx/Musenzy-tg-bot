@@ -1,0 +1,1081 @@
+"""Command and callback handlers for the music bot."""
+from __future__ import annotations
+
+import asyncio
+import collections
+import contextlib
+import html
+import logging
+
+from pyrogram import Client, enums, filters
+from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlreadyParticipant, UserNotParticipant
+from pyrogram.types import CallbackQuery, Message
+
+from autoplay import AutoplayManager
+from bot_api import BotApiClient, BotApiError
+from broadcast import BroadcastManager
+from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
+from keyboards import (
+    broadcast_schedule_menu,
+    player_controls,
+    player_controls_api,
+    welcome_menu,
+)
+from player import VoiceChatPlayer
+from playlist_manager import PlaylistManager
+from progress import NowPlayingTracker
+from queue_manager import QueueManager, Track
+from youtube import (
+    TrackNotFound, TrackTooLong, YouTubeBlocked,
+    fetch_playlist_entries, get_related_track,
+    resolve_and_download, resolve_stream_url,
+    _extract_video_id,
+)
+
+log = logging.getLogger("handlers")
+
+# Module-level dedup sets — survive handler re-registration and are shared
+# across all closures so a duplicate delivery is always caught.
+_seen_message_ids: set[int] = set()
+_seen_callback_ids: set[str] = set()
+
+COMMANDS_TEXT = (
+    "Commands:\n"
+    "/play <song name or link> -- play or queue a track\n"
+    "/skip -- skip the current track\n"
+    "/pause -- pause playback\n"
+    "/resume -- resume playback\n"
+    "/stop -- stop and leave the voice chat\n"
+    "/queue -- show the current queue"
+)
+
+
+def _format_duration(seconds: int) -> str:
+    if not seconds:
+        return "Live"
+    hours, rem = divmod(seconds, 3600)
+    mins, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+
+def _format_track(track: Track, position: int | None = None) -> str:
+    duration = _format_duration(track.duration)
+    title = html.escape(track.title)
+    requester = track.requested_by
+    if position is None:
+        return (
+            "🎵 <b>ɴᴏᴡ ᴘʟᴀʏɪɴɢ</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎧 <b>{title}</b>\n\n"
+            f"⏱ <code>{duration}</code>   ·   👤 {requester}"
+        )
+    return (
+        f"✨ <b>ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ</b>  <code>#{position}</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎧 <b>{title}</b>\n\n"
+        f"⏱ <code>{duration}</code>   ·   👤 {requester}"
+    )
+
+
+async def _is_admin(client: Client, chat_id: int, user_id: int) -> bool:
+    """Return True if user_id is an admin or creator in chat_id."""
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status.value in ("administrator", "owner", "creator")
+    except Exception:
+        return False
+
+
+async def _send_and_delete(chat_id: int, bot: Client, text: str, delay: int = 8) -> None:
+    """Send a temporary message and delete it after `delay` seconds."""
+    try:
+        msg = await bot.send_message(chat_id, text)
+        await asyncio.sleep(delay)
+        with contextlib.suppress(Exception):
+            await msg.delete()
+    except Exception:
+        pass
+
+
+_SEARCH_EMOJIS = ["🦋", "🕊️", "👾"]
+
+
+async def _animate_searching(status: Message, query: str) -> None:
+    """Cycle the status message through a small emoji-only animation while
+    the track is being resolved and downloaded."""
+    i = 0
+    while True:
+        # Sleep first — the initial "Searching..." text is already visible.
+        # 5 s between edits keeps us well under Telegram's EditMessage flood limit.
+        await asyncio.sleep(5)
+        emoji = _SEARCH_EMOJIS[i % len(_SEARCH_EMOJIS)]
+        with contextlib.suppress(Exception):
+            await status.edit_text(emoji)
+        i += 1
+
+
+async def _ensure_assistant_in_chat(client: Client, assistant: Client, chat_id: int) -> str | None:
+    """Make sure the music assistant account is a member of this chat, joining it
+    automatically via a fresh invite link if it isn't yet. Returns an error
+    message to show the user, or None on success."""
+    try:
+        await assistant.get_chat_member(chat_id, "me")
+        return None
+    except (UserNotParticipant, ChannelInvalid, ChannelPrivate):
+        # ChannelInvalid / ChannelPrivate fires when the assistant has never
+        # seen this chat before — treat it the same as not being a member.
+        pass
+
+    me = await client.get_chat_member(chat_id, "me")
+    if not me.privileges or not me.privileges.can_invite_users:
+        return (
+            "I need to be an admin here with \"Invite users via link\" permission so I can bring "
+            "the music assistant in automatically."
+        )
+
+    try:
+        link = await client.create_chat_invite_link(chat_id, member_limit=1)
+        await assistant.join_chat(link.invite_link)
+    except UserAlreadyParticipant:
+        return None
+    except Exception:
+        return "Couldn't bring the music assistant into this group. Please check my admin permissions and try again."
+
+    return None
+
+
+def register_handlers(
+    bot: Client,
+    assistant: Client,
+    player: VoiceChatPlayer,
+    queues: QueueManager,
+    broadcaster: BroadcastManager,
+    autoplayer: AutoplayManager,
+    playlists: PlaylistManager,
+) -> None:
+    tracker = NowPlayingTracker()
+    bot_api = BotApiClient(BOT_TOKEN or "")
+
+    # Per-chat locks: prevent two concurrent /play downloads in the same chat.
+    _chat_locks: dict[int, asyncio.Lock] = {}
+
+    # Background playlist-loading tasks per chat (cancelled on /stop).
+    _playlist_tasks: dict[int, asyncio.Task] = {}
+
+    # Autoplay repeat protection: no YouTube video may be selected twice during
+    # one active autoplay session. This is intentionally a set, not a rolling
+    # window, because the user wants new songs rather than repeats after 4/5.
+    _played_history: dict[int, set[str]] = {}
+    _mood_history: dict[int, collections.deque] = {}
+
+    def _track_key(url: str) -> str:
+        return _extract_video_id(url) or url.strip().lower()
+
+    def _record_played(chat_id: int, track: Track) -> None:
+        """Record a started track for cooldown and recommendation mood."""
+        key = _track_key(track.url)
+        _played_history.setdefault(chat_id, set()).add(key)
+
+        mood = _mood_history.setdefault(chat_id, collections.deque(maxlen=5))
+        mood = collections.deque(
+            (item for item in mood if _track_key(item.url) != key),
+            maxlen=5,
+        )
+        mood.append(track)
+        _mood_history[chat_id] = mood
+
+    def _played_ids(chat_id: int) -> frozenset:
+        return frozenset(_played_history.get(chat_id, []))
+
+    def _clear_autoplay_memory(chat_id: int) -> None:
+        _played_history.pop(chat_id, None)
+        _mood_history.pop(chat_id, None)
+
+    def _mood_seed_urls(chat_id: int, current: Track) -> list[str]:
+        """Return the current song plus the four most recent mood anchors."""
+        urls: list[str] = []
+        seen: set[str] = set()
+        for track in [current, *reversed(_mood_history.get(chat_id, []))]:
+            video_id = _extract_video_id(track.url)
+            key = video_id or track.url
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(track.url)
+            if len(urls) == 5:
+                break
+        return urls
+
+    _track_urls: dict[int, str] = {}
+
+    def _controls(chat_id: int, elapsed: int = 0, duration: int = 0):
+        paused = queues.state(chat_id).paused
+        if elapsed == 0 and duration == 0:
+            elapsed, duration = tracker.current_elapsed(chat_id)
+        return player_controls_api(
+            paused=paused, elapsed=elapsed, duration=duration,
+            track_url=_track_urls.get(chat_id, ""),
+        )
+
+    async def _post_now_playing(chat_id: int, track: Track) -> None:
+        """Sends a fresh "now playing" message and starts its live progress
+        bar. Fires on every track start -- the initial /play, /skip, button
+        skips, and automatic advance when a track finishes."""
+        # Delete the previous Now Playing card before posting the new one.
+        old_message = tracker.current_message(chat_id)
+        if old_message is not None:
+            with contextlib.suppress(Exception):
+                await old_message.delete()
+
+        caption = _format_track(track)
+        # Record in play history so autoplay avoids repeating this song.
+        _record_played(chat_id, track)
+        # Remember this chat's track URL so the blue bar button can link to it.
+        _track_urls[chat_id] = track.url
+        # Bar lives in the keyboard button — caption is track info only.
+        initial_markup = player_controls_api(
+            paused=False,
+            elapsed=0,
+            duration=track.duration,
+            track_url=track.url,
+        )
+        try:
+            if track.thumbnail:
+                try:
+                    message = await bot_api.send_photo(
+                        chat_id,
+                        track.thumbnail,
+                        caption,
+                        reply_markup=initial_markup,
+                    )
+                except BotApiError:
+                    log.warning(
+                        "Could not send thumbnail through Bot API for chat %s; "
+                        "falling back to styled text",
+                        chat_id,
+                    )
+                    message = await bot_api.send_message(
+                        chat_id,
+                        caption,
+                        reply_markup=initial_markup,
+                    )
+            else:
+                message = await bot_api.send_message(
+                    chat_id,
+                    caption,
+                    reply_markup=initial_markup,
+                )
+        except Exception:
+            # Keep playback usable if Telegram temporarily rejects the new
+            # Bot API field or the HTTP API is unavailable.
+            log.exception(
+                "Styled now-playing post failed for chat %s; using Pyrofork fallback",
+                chat_id,
+            )
+            try:
+                fallback_markup = player_controls(
+                    paused=False,
+                    elapsed=0,
+                    duration=track.duration,
+                    track_url=track.url,
+                )
+                if track.thumbnail:
+                    try:
+                        message = await bot.send_photo(
+                            chat_id,
+                            track.thumbnail,
+                            caption=caption,
+                            reply_markup=fallback_markup,
+                            parse_mode=enums.ParseMode.HTML,
+                        )
+                    except FloodWait as e:
+                        log.warning(
+                            "FloodWait %ds on send_photo for chat %s — falling back to text",
+                            e.value,
+                            chat_id,
+                        )
+                        await asyncio.sleep(min(e.value, 10))
+                        message = await bot.send_message(
+                            chat_id,
+                            caption,
+                            reply_markup=fallback_markup,
+                            parse_mode=enums.ParseMode.HTML,
+                        )
+                else:
+                    message = await bot.send_message(
+                        chat_id,
+                        caption,
+                        reply_markup=fallback_markup,
+                        parse_mode=enums.ParseMode.HTML,
+                    )
+            except Exception:
+                log.exception("Failed to post now-playing message for chat %s", chat_id)
+                return
+        tracker.start(
+            chat_id, message, track.duration, caption,
+            lambda e, d, p, cid=chat_id: _controls(cid, e, d),
+        )
+
+    async def _post_queue_empty(chat_id: int) -> None:
+        """Fires once the queue runs out and the assistant has left the
+        voice chat -- stops the progress tracker and lets everyone know."""
+        tracker.stop(chat_id)
+        _clear_autoplay_memory(chat_id)
+        with contextlib.suppress(Exception):
+            await bot.send_message(chat_id, "✅ Queue finished, left the voice chat.")
+
+    async def _silent_autoplay_fetch(chat_id: int, last_track: Track) -> Track | None:
+        """Background prefetch: silently fetch next autoplay track while current
+        song plays. No Telegram messages — called early so the track is ready
+        the moment the current song ends."""
+        if not autoplayer.is_enabled(chat_id):
+            return None
+        try:
+            info = await get_related_track(
+                last_track.url,
+                played_ids=_played_ids(chat_id),
+                seed_urls=_mood_seed_urls(chat_id, last_track),
+            )
+        except Exception:
+            return None
+        if not info:
+            return None
+        return Track(
+            title=info["title"],
+            url=info["url"],
+            stream_url=info["url"],
+            duration=info["duration"],
+            thumbnail=info["thumbnail"],
+            requested_by="🔄 Autoplay",
+            file_path=info["file_path"],
+        )
+
+    async def _autoplay_next(chat_id: int, last_track: Track) -> Track | None:
+        """Fallback: called only when the silent prefetch missed or failed.
+        Shows a "fetching" message since there will be a visible wait."""
+        if not autoplayer.is_enabled(chat_id):
+            return None
+
+        notify_task = asyncio.create_task(
+            bot.send_message(chat_id, "🔄 <b>Autoplay</b> — finding next song…",
+                             parse_mode=enums.ParseMode.HTML)
+        )
+        try:
+            info = await get_related_track(
+                last_track.url,
+                played_ids=_played_ids(chat_id),
+                seed_urls=_mood_seed_urls(chat_id, last_track),
+            )
+        except Exception:
+            info = None
+
+        # Delete the "fetching" message as soon as we have a result
+        with contextlib.suppress(Exception):
+            msg = await notify_task
+            await msg.delete()
+
+        if not info:
+            with contextlib.suppress(Exception):
+                await bot.send_message(
+                    chat_id,
+                    "🔄 Autoplay couldn't find a related track. Leaving voice chat.",
+                )
+            return None
+
+        return Track(
+            title=info["title"],
+            url=info["url"],
+            stream_url=info["url"],
+            duration=info["duration"],
+            thumbnail=info["thumbnail"],
+            requested_by="🔄 Autoplay",
+            file_path=info["file_path"],
+        )
+
+    player.on_track_start = _post_now_playing
+    player.on_queue_empty = _post_queue_empty
+    player.on_autoplay_next = _autoplay_next
+    player.on_autoplay_prefetch = _silent_autoplay_fetch
+
+    @bot.on_message(filters.command("start") & filters.private)
+    async def start_cmd(_client: Client, message: Message) -> None:
+        user = message.from_user.mention if message.from_user else "there"
+        caption = (
+            f"Welcome {user} ,this is Musenzy a powerfull,free,music bot for you\n\n"
+            "Add me to a group as admin with \"Invite users via link\" permission, start the group's "
+            "voice chat, then use /play <song name or link> -- I'll bring the music assistant in "
+            "automatically. Works independently in every group I'm in."
+        )
+        await message.reply_photo(LOGO_PATH, caption=caption, reply_markup=welcome_menu())
+
+    @bot.on_callback_query(filters.regex(r"^menu:commands$"))
+    async def menu_cb(_client: Client, query: CallbackQuery) -> None:
+        await query.answer()
+        await query.message.reply_text(COMMANDS_TEXT)
+
+    @bot.on_message(filters.command("play") & filters.group)
+    async def play_cmd(client: Client, message: Message) -> None:
+        # Drop duplicate deliveries of the same message (Telegram re-sends
+        # unacknowledged updates when the bot is slow, e.g. during yt-dlp fetch).
+        if message.id in _seen_message_ids:
+            return
+        _seen_message_ids.add(message.id)
+        # Keep the set bounded — discard old IDs after 500 entries.
+        if len(_seen_message_ids) > 500:
+            _seen_message_ids.discard(next(iter(_seen_message_ids)))
+
+        # Track this group so broadcast can reach it.
+        broadcaster.register_chat(message.chat.id)
+
+        query = message.text.split(maxsplit=1)
+        chat_id = message.chat.id
+        if len(query) < 2:
+            asyncio.create_task(_send_and_delete(chat_id, bot, "Usage: /play <song name or YouTube link>"))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        join_error = await _ensure_assistant_in_chat(client, assistant, chat_id)
+        if join_error:
+            asyncio.create_task(_send_and_delete(chat_id, bot, join_error))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        # Per-chat lock: only one download at a time per group.
+        lock = _chat_locks.setdefault(chat_id, asyncio.Lock())
+        if lock.locked():
+            # Silently discard — a download is already in progress.
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        async with lock:
+            # Delete the /play command immediately.
+            with contextlib.suppress(Exception):
+                await message.delete()
+
+            # Send a searching indicator — a lone animated emoji spins in Telegram.
+            searching_msg = None
+            with contextlib.suppress(Exception):
+                searching_msg = await bot.send_message(chat_id, "🔍")
+
+            try:
+                # Resolve the direct audio URL instead of downloading and
+                # re-encoding the whole track. This makes /play start much
+                # faster while preserving YouTube's original best audio.
+                info = await resolve_stream_url(query[1])
+            except TrackTooLong as exc:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+                asyncio.create_task(_send_and_delete(chat_id, bot, str(exc)))
+                return
+            except TrackNotFound:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that track."))
+                return
+            except YouTubeBlocked:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+                asyncio.create_task(
+                    _send_and_delete(
+                        chat_id,
+                        bot,
+                        "❌ YouTube blocked this server. Please refresh the YouTube cookies in "
+                        "YOUTUBE_COOKIES_B64, then restart the bot.",
+                    )
+                )
+                return
+            except Exception:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+                log.exception("Failed to resolve track for chat %s", chat_id)
+                asyncio.create_task(
+                    _send_and_delete(chat_id, bot, "❌ Could not fetch that track right now.")
+                )
+                return
+            finally:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+
+            user = message.from_user
+            if user:
+                requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+            else:
+                requester = "someone"
+            track = Track(
+                title=info["title"],
+                url=info["url"],
+                stream_url=info["url"],
+                duration=info["duration"],
+                thumbnail=info["thumbnail"],
+                requested_by=requester,
+                file_path=info["file_path"],
+            )
+
+            position = await player.play_or_enqueue(message.chat.id, track)
+            if position > 0:
+                # Queued — on_track_start won't fire yet, so post the queued message here.
+                text = _format_track(track, position)
+                if track.thumbnail:
+                    await message.reply_photo(track.thumbnail, caption=text, parse_mode=enums.ParseMode.HTML)
+                else:
+                    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            # position == 0: on_track_start already posted the "Now playing" card.
+
+    @bot.on_message(filters.command("skip") & filters.group)
+    async def skip_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can skip tracks."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+        nxt = await player.play_next(message.chat.id)
+        if nxt:
+            await message.reply_text("⏭ Skipped.")
+
+    @bot.on_message(filters.command("pause") & filters.group)
+    async def pause_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can pause playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+        await player.pause(message.chat.id)
+        tracker.pause(message.chat.id)
+        await message.reply_text("⏸ Paused.")
+
+    @bot.on_message(filters.command("resume") & filters.group)
+    async def resume_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can resume playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+        await player.resume(message.chat.id)
+        tracker.resume(message.chat.id)
+        await message.reply_text("▶️ Resumed.")
+
+    @bot.on_message(filters.command("stop") & filters.group)
+    async def stop_cmd(client: Client, message: Message) -> None:
+        if not await _is_admin(client, message.chat.id, message.from_user.id):
+            asyncio.create_task(_send_and_delete(message.chat.id, bot, "🚫 Only admins can stop playback."))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+        # Cancel any background playlist loading for this chat.
+        task = _playlist_tasks.pop(message.chat.id, None)
+        if task:
+            task.cancel()
+        tracker.stop(message.chat.id)
+        await player.stop(message.chat.id)
+        _clear_autoplay_memory(message.chat.id)
+        await message.reply_text("Stopped and left the voice chat.")
+
+    @bot.on_message(filters.command("queue") & filters.group)
+    async def queue_cmd(_client: Client, message: Message) -> None:
+        state = queues.state(message.chat.id)
+        ap_status = "🟢 On" if autoplayer.is_enabled(message.chat.id) else "🔴 Off"
+        if not state.current:
+            await message.reply_text(f"Nothing is playing right now.\n🔄 Autoplay: {ap_status}")
+            return
+        lines = [_format_track(state.current)]
+        for i, track in enumerate(state.queue, start=1):
+            lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
+        lines.append(f"\n🔄 Autoplay: {ap_status}")
+        await message.reply_text("\n".join(lines))
+
+    # ──────────────────────────────────────────────
+    # Playlist commands
+    # ──────────────────────────────────────────────
+
+    @bot.on_message(filters.command("playlist") & filters.group)
+    async def playlist_cmd(client: Client, message: Message) -> None:
+        """Play a YouTube playlist URL or a user's saved playlist by name."""
+        parts = message.text.split(maxsplit=1)
+        chat_id = message.chat.id
+        broadcaster.register_chat(chat_id)
+
+        if len(parts) < 2:
+            await message.reply_text(
+                "📋 <b>Playlist usage</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "/playlist &lt;youtube_playlist_url&gt;\n"
+                "/playlist &lt;saved_name&gt;\n\n"
+                "Save a playlist first with:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        arg = parts[1].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        # Resolve saved name → URL if arg is not a URL.
+        url = arg
+        if not arg.startswith("http"):
+            saved_url = playlists.get(user_id, arg)
+            if not saved_url:
+                await message.reply_text(
+                    f"❌ No saved playlist named <code>{html.escape(arg)}</code>.\n"
+                    "Use /myplaylists to see your saved playlists.",
+                    parse_mode=enums.ParseMode.HTML,
+                )
+                return
+            url = saved_url
+
+        join_error = await _ensure_assistant_in_chat(client, assistant, chat_id)
+        if join_error:
+            asyncio.create_task(_send_and_delete(chat_id, bot, join_error))
+            with contextlib.suppress(Exception):
+                await message.delete()
+            return
+
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        status_msg = await bot.send_message(chat_id, "📋 Fetching playlist info…")
+
+        try:
+            entries = await fetch_playlist_entries(url, max_tracks=50)
+        except Exception:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text(
+                    "❌ Couldn't fetch that playlist. Make sure it's a valid, public YouTube playlist URL."
+                )
+            return
+
+        if not entries:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text("❌ Playlist is empty or not accessible.")
+            return
+
+        user = message.from_user
+        if user:
+            requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+        else:
+            requester = "someone"
+
+        total = len(entries)
+        with contextlib.suppress(Exception):
+            await status_msg.edit_text(
+                f"📋 Found <b>{total}</b> track(s) — downloading first song…",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+        # Download and start the first track immediately.
+        try:
+            first_info = await resolve_and_download(entries[0]["url"])
+        except Exception:
+            with contextlib.suppress(Exception):
+                await status_msg.edit_text("❌ Couldn't load the first track in the playlist.")
+            return
+
+        first_track = Track(
+            title=first_info["title"],
+            url=first_info["url"],
+            stream_url=first_info["url"],
+            duration=first_info["duration"],
+            thumbnail=first_info["thumbnail"],
+            requested_by=requester,
+            file_path=first_info["file_path"],
+        )
+        await player.play_or_enqueue(chat_id, first_track)
+        with contextlib.suppress(Exception):
+            await status_msg.delete()
+
+        if total > 1:
+            # Cancel any prior background loader for this chat.
+            old_task = _playlist_tasks.pop(chat_id, None)
+            if old_task:
+                old_task.cancel()
+
+            async def _load_rest(
+                _entries=entries[1:], _chat_id=chat_id, _req=requester
+            ) -> None:
+                for entry in _entries:
+                    # Stop loading if the voice chat ended (user used /stop).
+                    if queues.state(_chat_id).current is None:
+                        break
+                    try:
+                        info = await resolve_and_download(entry["url"])
+                    except Exception:
+                        continue  # skip unplayable tracks silently
+                    track = Track(
+                        title=info["title"],
+                        url=info["url"],
+                        stream_url=info["url"],
+                        duration=info["duration"],
+                        thumbnail=info["thumbnail"],
+                        requested_by=_req,
+                        file_path=info["file_path"],
+                    )
+                    await player.play_or_enqueue(_chat_id, track)
+                _playlist_tasks.pop(_chat_id, None)
+
+            _playlist_tasks[chat_id] = asyncio.create_task(_load_rest())
+            await bot.send_message(
+                chat_id,
+                f"📋 <b>Playlist loading</b> — queuing <b>{total - 1}</b> more track(s) in the background…",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+    @bot.on_message(filters.command("saveplaylist"))
+    async def saveplaylist_cmd(_client: Client, message: Message) -> None:
+        """Save a YouTube playlist URL under a short name. Works in DM or group."""
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3 or not parts[2].startswith("http"):
+            await message.reply_text(
+                "📋 <b>Save a playlist</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Usage: <code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>\n\n"
+                "Example:\n"
+                "<code>/saveplaylist lofi https://youtube.com/playlist?list=...</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        name = parts[1].strip()
+        url = parts[2].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        if len(name) > 32:
+            await message.reply_text("❌ Playlist name must be 32 characters or fewer.")
+            return
+
+        playlists.save(user_id, name, url)
+        await message.reply_text(
+            f"✅ Saved playlist <b>{html.escape(name)}</b>!\n"
+            f"Use <code>/playlist {html.escape(name)}</code> in any group to play it.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("myplaylists"))
+    async def myplaylists_cmd(_client: Client, message: Message) -> None:
+        """List all saved playlists for the user."""
+        user_id = message.from_user.id if message.from_user else 0
+        saved = playlists.list_playlists(user_id)
+
+        if not saved:
+            await message.reply_text(
+                "📋 You have no saved playlists yet.\n\n"
+                "Save one with:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        lines = ["📋 <b>Your saved playlists</b>\n━━━━━━━━━━━━━━━━━━"]
+        for i, (name, url) in enumerate(saved.items(), 1):
+            lines.append(f"{i}. <b>{html.escape(name)}</b> — <a href=\"{url}\">link</a>")
+        lines.append(
+            "\nUse <code>/playlist &lt;name&gt;</code> in a group to play one.\n"
+            "Delete with <code>/deleteplaylist &lt;name&gt;</code>."
+        )
+        await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML,
+                                 disable_web_page_preview=True)
+
+    @bot.on_message(filters.command("deleteplaylist"))
+    async def deleteplaylist_cmd(_client: Client, message: Message) -> None:
+        """Delete a saved playlist by name."""
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply_text(
+                "Usage: <code>/deleteplaylist &lt;name&gt;</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        name = parts[1].strip()
+        user_id = message.from_user.id if message.from_user else 0
+
+        if playlists.delete(user_id, name):
+            await message.reply_text(
+                f"🗑 Playlist <b>{html.escape(name)}</b> deleted.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        else:
+            await message.reply_text(
+                f"❌ No saved playlist named <code>{html.escape(name)}</code>.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+    @bot.on_message(filters.command("autoplay") & filters.group)
+    async def autoplay_cmd(_client: Client, message: Message) -> None:
+        """Toggle autoplay on — anyone in the group can enable it."""
+        broadcaster.register_chat(message.chat.id)
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        chat_id = message.chat.id
+        if not autoplayer.is_enabled(chat_id):
+            # Starting a new autoplay session gets a clean no-repeat set, but
+            # the currently playing song remains blocked if one is active.
+            _clear_autoplay_memory(chat_id)
+            current = queues.state(chat_id).current
+            if current:
+                _record_played(chat_id, current)
+        autoplayer.enable(chat_id)
+
+        await bot.send_message(
+            chat_id,
+            "🔄 <b>Autoplay enabled</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "When the queue ends I'll automatically play related songs "
+            "using YouTube's recommendations.\n\n"
+            "Use <code>/stopautoplay</code> to turn it off.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("stopautoplay") & filters.group)
+    async def stopautoplay_cmd(_client: Client, message: Message) -> None:
+        """Stop autoplay — anyone in the group can disable it."""
+        broadcaster.register_chat(message.chat.id)
+        with contextlib.suppress(Exception):
+            await message.delete()
+
+        autoplayer.disable(message.chat.id)
+        _clear_autoplay_memory(message.chat.id)
+
+        await bot.send_message(
+            message.chat.id,
+            "🔄 <b>Autoplay disabled</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "The bot will leave the voice chat when the queue runs out.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_callback_query(filters.regex(r"^ctl:"))
+    async def controls_cb(client: Client, query: CallbackQuery) -> None:
+        # Deduplicate: Telegram re-delivers unacknowledged callback queries.
+        if query.id in _seen_callback_ids:
+            return
+        _seen_callback_ids.add(query.id)
+        if len(_seen_callback_ids) > 500:
+            _seen_callback_ids.discard(next(iter(_seen_callback_ids)))
+
+        action = query.data.split(":", 1)[1]
+        chat_id = query.message.chat.id
+
+        # queue and close are read-only — anyone can use them.
+        if action not in ("queue", "close"):
+            if not await _is_admin(client, chat_id, query.from_user.id):
+                with contextlib.suppress(Exception):
+                    await query.answer("🚫 Only admins can control playback.", show_alert=True)
+                return
+
+        state = queues.state(chat_id)
+
+        if action == "pauseresume":
+            if state.paused:
+                await player.resume(chat_id)
+                tracker.resume(chat_id)
+                with contextlib.suppress(Exception):
+                    await query.answer("Resumed")
+            else:
+                await player.pause(chat_id)
+                tracker.pause(chat_id)
+                with contextlib.suppress(Exception):
+                    await query.answer("Paused")
+            with contextlib.suppress(Exception):
+                if query.message.reply_markup:
+                    try:
+                        await bot_api.call(
+                            "editMessageReplyMarkup",
+                            {
+                                "chat_id": chat_id,
+                                "message_id": query.message.id,
+                                "reply_markup": _controls(chat_id),
+                            },
+                        )
+                    except Exception:
+                        # Messages sent before the Bot API transport was
+                        # available are still editable through Pyrofork.
+                        await query.message.edit_reply_markup(
+                            player_controls(paused=state.paused)
+                        )
+        elif action == "skip":
+            await player.play_next(chat_id)
+            with contextlib.suppress(Exception):
+                await query.answer("Skipped")
+        elif action == "stop":
+            tracker.stop(chat_id)
+            await player.stop(chat_id)
+            with contextlib.suppress(Exception):
+                await query.answer("Stopped")
+            await query.message.reply_text("Stopped and left the voice chat.")
+        elif action == "queue":
+            if not state.current:
+                with contextlib.suppress(Exception):
+                    await query.answer("Nothing playing", show_alert=True)
+                return
+            lines = [_format_track(state.current)]
+            for i, track in enumerate(state.queue, start=1):
+                lines.append(f"{i}. {track.title} -- requested by {track.requested_by}")
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text("\n".join(lines))
+        elif action == "addplaylist":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                "🔵 <b>Add Playlist+</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Load any YouTube playlist into the queue:\n"
+                "<code>/playlist &lt;youtube_playlist_url&gt;</code>\n\n"
+                "Play a saved playlist by name:\n"
+                "<code>/playlist &lt;name&gt;</code>\n\n"
+                "Save a playlist for quick access:\n"
+                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>\n\n"
+                "View your saved playlists:\n"
+                "<code>/myplaylists</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        elif action == "close":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            with contextlib.suppress(Exception):
+                await query.message.delete()
+
+    # ──────────────────────────────────────────────
+    # Group auto-registration (for broadcast coverage)
+    # ──────────────────────────────────────────────
+
+    @bot.on_message(filters.group & ~filters.service)
+    async def _register_group(_client: Client, message: Message) -> None:
+        """Silently register every group the bot receives a message from
+        so broadcast can reach it even if /play has never been used there."""
+        broadcaster.register_chat(message.chat.id)
+
+    # ──────────────────────────────────────────────
+    # Broadcast — owner only
+    # ──────────────────────────────────────────────
+
+    def _is_owner(user_id: int) -> bool:
+        return OWNER_ID != 0 and user_id == OWNER_ID
+
+    @bot.on_message(filters.command("groups") & filters.private)
+    async def groups_cmd(client: Client, message: Message) -> None:
+        """Owner-only: list every group the bot is present in."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        chat_ids = broadcaster.known_chats()
+        if not chat_ids:
+            await message.reply_text("📭 The bot hasn't been added to any groups yet.")
+            return
+
+        lines = [f"👥 <b>Groups the bot is in</b> ({len(chat_ids)} total)\n━━━━━━━━━━━━━━━━━━"]
+        for i, chat_id in enumerate(chat_ids, 1):
+            try:
+                chat = await client.get_chat(chat_id)
+                name = html.escape(chat.title or str(chat_id))
+                members = f"  · {chat.members_count} members" if chat.members_count else ""
+                username = f" (@{chat.username})" if chat.username else ""
+                lines.append(f"{i}. <b>{name}</b>{username}{members}\n   <code>{chat_id}</code>")
+            except Exception:
+                lines.append(f"{i}. <i>Unknown group</i>\n   <code>{chat_id}</code>")
+
+        await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML)
+
+    @bot.on_message(filters.command("broadcast") & filters.private)
+    async def broadcast_cmd(_client: Client, message: Message) -> None:
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        # Determine the message text: either inline, a reply, or prompt.
+        text: str | None = None
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text.html
+        elif len(message.text.split(maxsplit=1)) > 1:
+            text = html.escape(message.text.split(maxsplit=1)[1])
+
+        if not text:
+            await message.reply_text(
+                "📝 Please send the message you want to broadcast as a reply to this command, "
+                "or write it after the command:\n\n<code>/broadcast Hello everyone!</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        broadcaster.set_pending(message.from_user.id, text)
+        active = broadcaster.active_schedule_hours()
+        chats = len(broadcaster.known_chats())
+        await message.reply_text(
+            f"📢 <b>Broadcast ready</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Message:</b>\n{text}\n\n"
+            f"<b>Groups:</b> {chats}\n"
+            + (f"<b>Active schedule:</b> every {active}h\n" if active else "")
+            + "\nChoose when to send:",
+            parse_mode=enums.ParseMode.HTML,
+            reply_markup=broadcast_schedule_menu(active_hours=active),
+        )
+
+    @bot.on_callback_query(filters.regex(r"^bcast:"))
+    async def broadcast_cb(_client: Client, query: CallbackQuery) -> None:
+        if not _is_owner(query.from_user.id):
+            with contextlib.suppress(Exception):
+                await query.answer("🚫 Owner only.", show_alert=True)
+            return
+
+        action = query.data.split(":", 1)[1]
+        owner_id = query.from_user.id
+        text = broadcaster.get_pending(owner_id)
+
+        if action == "close":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            with contextlib.suppress(Exception):
+                await query.message.delete()
+            return
+
+        if action == "cancel":
+            had = broadcaster.cancel_schedule()
+            with contextlib.suppress(Exception):
+                await query.answer("Schedule cancelled." if had else "No active schedule.", show_alert=True)
+            with contextlib.suppress(Exception):
+                await query.message.edit_reply_markup(broadcast_schedule_menu(active_hours=0))
+            return
+
+        if not text:
+            with contextlib.suppress(Exception):
+                await query.answer("No message set. Use /broadcast first.", show_alert=True)
+            return
+
+        if action == "now":
+            with contextlib.suppress(Exception):
+                await query.answer("Sending…")
+            sent, failed = await broadcaster.send_now(bot, text)
+            broadcaster.clear_pending(owner_id)
+            with contextlib.suppress(Exception):
+                await query.message.edit_text(
+                    f"✅ Broadcast sent to <b>{sent}</b> group(s)"
+                    + (f", failed on <b>{failed}</b>." if failed else "."),
+                    parse_mode=enums.ParseMode.HTML,
+                )
+        elif action in ("1", "2", "3"):
+            hours = int(action)
+            broadcaster.schedule(bot, text, hours)
+            broadcaster.clear_pending(owner_id)
+            with contextlib.suppress(Exception):
+                await query.answer(f"Scheduled every {hours}h ✅")
+            with contextlib.suppress(Exception):
+                await query.message.edit_text(
+                    f"⏰ Broadcast scheduled every <b>{hours}h</b> to "
+                    f"<b>{len(broadcaster.known_chats())}</b> group(s).\n\n"
+                    f"<b>Message:</b>\n{text}\n\n"
+                    "Use /broadcast → 🚫 Cancel Schedule to stop it.",
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=broadcast_schedule_menu(active_hours=hours),
+                )

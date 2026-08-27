@@ -1,10 +1,48 @@
-entrypoint = "main.py"
-modules = ["python-3.8:v2-20230907-3d66d15"]
+modules = ["nodejs-20", "python-3.11", "web"]
 
-hidden = [".pythonlibs"]
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Music Bot"
+
+[[workflows.workflow]]
+name = "Telegram Music Bot"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = ".pythonlibs/bin/python services/telegram-music-bot/main.py"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
 
 [nix]
-channel = "stable-23_05"
+channel = "stable-25_05"
 
-[env]
-LANG = "en_US.UTF-8"
+[userenv]
+
+[userenv.shared]
+OWNER_ID = "7717683661"
