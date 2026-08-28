@@ -132,6 +132,7 @@ async def run() -> None:
     public_commands = [
         BotCommand("start",          "Show welcome message and instructions"),
         BotCommand("play",           "Play a song by name or YouTube link"),
+        BotCommand("vplay",          "Play a video in the voice chat"),
         BotCommand("skip",           "Skip the current track"),
         BotCommand("pause",          "Pause playback"),
         BotCommand("resume",         "Resume playback"),

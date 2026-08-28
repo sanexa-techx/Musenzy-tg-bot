@@ -80,3 +80,10 @@ def _get_session():
             return val
     return os.environ.get("TELEGRAM_SESSION_STRING") or None
 ```
+
+## Video playback
+PyTgCalls video playback can combine a direct video URL and a separate direct audio URL with `MediaStream(audio_path=..., video_parameters=...)`; use a required video flag when the command is explicitly video.
+
+**Why:** yt-dlp commonly selects separate adaptive video and audio formats, while passing only the video format produces a silent or incomplete voice-chat stream.
+
+**How to apply:** Keep media type on each queued track so mixed `/play` and `/vplay` queues select the correct `MediaStream` configuration at start time.
