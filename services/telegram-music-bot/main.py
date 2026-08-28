@@ -141,7 +141,7 @@ async def run() -> None:
         BotCommand("saveplaylist",   "💾 Save a playlist under a name"),
         BotCommand("myplaylists",    "📂 List your saved playlists"),
         BotCommand("deleteplaylist", "🗑 Delete a saved playlist"),
-        BotCommand("autoplay",       "🔄 Enable autoplay of related songs"),
+        BotCommand("autoplay",       "🔄 Toggle related-song autoplay"),
         BotCommand("stopautoplay",   "⏹ Stop autoplay"),
     ]
     await bot.set_bot_commands(public_commands, scope=BotCommandScopeDefault())

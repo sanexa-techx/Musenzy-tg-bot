@@ -50,6 +50,7 @@ def player_controls(
     elapsed: int = 0,
     duration: int = 0,
     track_url: str = "",
+    autoplay_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     bar_label = render_bar_button(elapsed, duration, paused)
     # URL buttons render in Telegram's accent colour (blue).
@@ -69,7 +70,10 @@ def player_controls(
                 InlineKeyboardButton("✖️", callback_data="ctl:close"),
             ],
             [
-                InlineKeyboardButton("🔵 Add Playlist+", callback_data="ctl:addplaylist"),
+                InlineKeyboardButton(
+                    "✔️ 𝙰𝚄𝚃𝙾" if autoplay_enabled else "𝙰𝚄𝚃𝙾",
+                    callback_data="ctl:autoplay",
+                ),
             ],
         ]
     )
@@ -80,6 +84,7 @@ def player_controls_api(
     elapsed: int = 0,
     duration: int = 0,
     track_url: str = "",
+    autoplay_enabled: bool = False,
 ) -> dict:
     """Bot API 9.4 keyboard with actual button background styles.
 
@@ -120,9 +125,9 @@ def player_controls_api(
             ],
             [
                 button(
-                    "🔵 Add Playlist+",
-                    style="primary",
-                    callback_data="ctl:addplaylist",
+                    "✔️ 𝙰𝚄𝚃𝙾" if autoplay_enabled else "𝙰𝚄𝚃𝙾",
+                    style="success" if autoplay_enabled else "danger",
+                    callback_data="ctl:autoplay",
                 ),
             ],
         ]

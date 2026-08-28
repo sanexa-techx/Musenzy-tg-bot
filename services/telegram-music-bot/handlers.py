@@ -27,7 +27,7 @@ from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
 from youtube import (
     TrackNotFound, TrackTooLong, YouTubeBlocked,
-    fetch_playlist_entries, get_related_track,
+    download_thumbnail, fetch_playlist_entries, get_related_track,
     resolve_and_download, resolve_stream_url,
     _extract_video_id,
 )
@@ -46,7 +46,9 @@ COMMANDS_TEXT = (
     "/pause -- pause playback\n"
     "/resume -- resume playback\n"
     "/stop -- stop and leave the voice chat\n"
-    "/queue -- show the current queue"
+    "/queue -- show the current queue\n"
+    "/autoplay -- toggle related-song autoplay\n"
+    "/stopautoplay -- turn autoplay off"
 )
 
 
@@ -217,7 +219,40 @@ def register_handlers(
         return player_controls_api(
             paused=paused, elapsed=elapsed, duration=duration,
             track_url=_track_urls.get(chat_id, ""),
+            autoplay_enabled=autoplayer.is_enabled(chat_id),
         )
+
+    async def _refresh_controls(chat_id: int) -> None:
+        """Refresh the autoplay state without disturbing the progress bar."""
+        message = tracker.current_message(chat_id)
+        if message is None:
+            return
+
+        try:
+            await bot_api.call(
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message.id,
+                    "reply_markup": _controls(chat_id),
+                },
+            )
+            return
+        except Exception:
+            # Cards sent through Pyrofork still need a native markup fallback.
+            if not getattr(message, "chat", None):
+                return
+            elapsed, duration = tracker.current_elapsed(chat_id)
+            state = queues.state(chat_id)
+            await message.edit_reply_markup(
+                player_controls(
+                    paused=state.paused,
+                    elapsed=elapsed,
+                    duration=duration,
+                    track_url=_track_urls.get(chat_id, ""),
+                    autoplay_enabled=autoplayer.is_enabled(chat_id),
+                )
+            )
 
     async def _post_now_playing(chat_id: int, track: Track) -> None:
         """Sends a fresh "now playing" message and starts its live progress
@@ -234,19 +269,34 @@ def register_handlers(
         _record_played(chat_id, track)
         # Remember this chat's track URL so the blue bar button can link to it.
         _track_urls[chat_id] = track.url
+        # Upload a local copy when possible. Telegram cannot always fetch
+        # YouTube's remote thumbnail URL reliably.
+        try:
+            local_thumbnail = await download_thumbnail(track.thumbnail, track.url)
+        except Exception:
+            log.warning(
+                "Thumbnail preparation failed for chat %s",
+                chat_id,
+                exc_info=True,
+            )
+            local_thumbnail = None
+        if local_thumbnail:
+            track.thumbnail = local_thumbnail
         # Bar lives in the keyboard button — caption is track info only.
         initial_markup = player_controls_api(
             paused=False,
             elapsed=0,
             duration=track.duration,
             track_url=track.url,
+            autoplay_enabled=autoplayer.is_enabled(chat_id),
         )
         try:
-            if track.thumbnail:
+            photo = local_thumbnail or track.thumbnail
+            if photo:
                 try:
                     message = await bot_api.send_photo(
                         chat_id,
-                        track.thumbnail,
+                        photo,
                         caption,
                         reply_markup=initial_markup,
                     )
@@ -280,12 +330,14 @@ def register_handlers(
                     elapsed=0,
                     duration=track.duration,
                     track_url=track.url,
+                    autoplay_enabled=autoplayer.is_enabled(chat_id),
                 )
-                if track.thumbnail:
+                photo = local_thumbnail or track.thumbnail
+                if photo:
                     try:
                         message = await bot.send_photo(
                             chat_id,
-                            track.thumbnail,
+                            photo,
                             caption=caption,
                             reply_markup=fallback_markup,
                             parse_mode=enums.ParseMode.HTML,
@@ -525,6 +577,17 @@ def register_handlers(
             if position > 0:
                 # Queued — on_track_start won't fire yet, so post the queued message here.
                 text = _format_track(track, position)
+                try:
+                    local_thumbnail = await download_thumbnail(track.thumbnail, track.url)
+                except Exception:
+                    log.warning(
+                        "Queued thumbnail preparation failed for chat %s",
+                        chat_id,
+                        exc_info=True,
+                    )
+                    local_thumbnail = None
+                if local_thumbnail:
+                    track.thumbnail = local_thumbnail
                 if track.thumbnail:
                     await message.reply_photo(track.thumbnail, caption=text, parse_mode=enums.ParseMode.HTML)
                 else:
@@ -810,28 +873,41 @@ def register_handlers(
 
     @bot.on_message(filters.command("autoplay") & filters.group)
     async def autoplay_cmd(_client: Client, message: Message) -> None:
-        """Toggle autoplay on — anyone in the group can enable it."""
+        """Toggle autoplay — anyone in the group can change it."""
         broadcaster.register_chat(message.chat.id)
         with contextlib.suppress(Exception):
             await message.delete()
 
         chat_id = message.chat.id
-        if not autoplayer.is_enabled(chat_id):
+        if autoplayer.is_enabled(chat_id):
+            autoplayer.disable(chat_id)
+            _clear_autoplay_memory(chat_id)
+            response = (
+                "🔄 <b>Autoplay disabled</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "The bot will leave the voice chat when the queue runs out."
+            )
+        else:
             # Starting a new autoplay session gets a clean no-repeat set, but
             # the currently playing song remains blocked if one is active.
             _clear_autoplay_memory(chat_id)
             current = queues.state(chat_id).current
             if current:
                 _record_played(chat_id, current)
-        autoplayer.enable(chat_id)
+            autoplayer.enable(chat_id)
+            response = (
+                "🔄 <b>Autoplay enabled</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "When the queue ends I'll automatically play related songs "
+                "using YouTube's recommendations.\n\n"
+                "Use <code>/autoplay</code> again or <code>/stopautoplay</code> "
+                "to turn it off."
+            )
+        await _refresh_controls(chat_id)
 
         await bot.send_message(
             chat_id,
-            "🔄 <b>Autoplay enabled</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "When the queue ends I'll automatically play related songs "
-            "using YouTube's recommendations.\n\n"
-            "Use <code>/stopautoplay</code> to turn it off.",
+            response,
             parse_mode=enums.ParseMode.HTML,
         )
 
@@ -844,6 +920,7 @@ def register_handlers(
 
         autoplayer.disable(message.chat.id)
         _clear_autoplay_memory(message.chat.id)
+        await _refresh_controls(message.chat.id)
 
         await bot.send_message(
             message.chat.id,
@@ -886,22 +963,7 @@ def register_handlers(
                 with contextlib.suppress(Exception):
                     await query.answer("Paused")
             with contextlib.suppress(Exception):
-                if query.message.reply_markup:
-                    try:
-                        await bot_api.call(
-                            "editMessageReplyMarkup",
-                            {
-                                "chat_id": chat_id,
-                                "message_id": query.message.id,
-                                "reply_markup": _controls(chat_id),
-                            },
-                        )
-                    except Exception:
-                        # Messages sent before the Bot API transport was
-                        # available are still editable through Pyrofork.
-                        await query.message.edit_reply_markup(
-                            player_controls(paused=state.paused)
-                        )
+                await _refresh_controls(chat_id)
         elif action == "skip":
             await player.play_next(chat_id)
             with contextlib.suppress(Exception):
@@ -923,6 +985,22 @@ def register_handlers(
             with contextlib.suppress(Exception):
                 await query.answer()
             await query.message.reply_text("\n".join(lines))
+        elif action == "autoplay":
+            was_enabled = autoplayer.is_enabled(chat_id)
+            enabled = autoplayer.toggle(chat_id)
+            if enabled and not was_enabled:
+                # Start a fresh no-repeat session while keeping the current
+                # track excluded from recommendations.
+                _clear_autoplay_memory(chat_id)
+                if state.current:
+                    _record_played(chat_id, state.current)
+            elif not enabled:
+                _clear_autoplay_memory(chat_id)
+
+            with contextlib.suppress(Exception):
+                await query.answer("Autoplay enabled" if enabled else "Autoplay disabled")
+            with contextlib.suppress(Exception):
+                await _refresh_controls(chat_id)
         elif action == "addplaylist":
             with contextlib.suppress(Exception):
                 await query.answer()
