@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -10,6 +11,7 @@ import time
 import uuid
 
 import yt_dlp
+import aiohttp
 
 from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 
@@ -320,6 +322,73 @@ def _extract_video_id(url: str) -> str | None:
     """Pull the 11-char video ID from any YouTube watch URL."""
     m = _re.search(r"(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})", url)
     return m.group(1) if m else None
+
+
+async def download_thumbnail(
+    thumbnail_url: str | None,
+    video_url: str = "",
+) -> str | None:
+    """Download a Telegram-safe thumbnail and return its local path.
+
+    Telegram's servers occasionally cannot fetch YouTube's remote thumbnail
+    URL, especially ``maxresdefault.jpg`` when that rendition is unavailable.
+    Downloading it here lets the Bot API upload the bytes directly and also
+    gives us several YouTube quality fallbacks.
+    """
+    if thumbnail_url and os.path.isfile(thumbnail_url):
+        return thumbnail_url
+
+    video_id = _extract_video_id(video_url) or _extract_video_id(thumbnail_url or "")
+    cache_key = video_id or hashlib.sha1(
+        (thumbnail_url or video_url).encode("utf-8")
+    ).hexdigest()
+    if not cache_key:
+        return None
+
+    cache_path = os.path.join(DOWNLOAD_DIR, f"thumbnail-{cache_key}.jpg")
+    try:
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1024:
+            return cache_path
+    except OSError:
+        pass
+
+    candidates: list[str] = []
+    if thumbnail_url:
+        candidates.append(thumbnail_url)
+    if video_id:
+        for quality in ("maxresdefault", "hqdefault", "sddefault", "default"):
+            candidates.append(f"https://i.ytimg.com/vi/{video_id}/{quality}.jpg")
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    if not unique_candidates:
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=12)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            for candidate in unique_candidates:
+                try:
+                    async with session.get(candidate) as response:
+                        if response.status != 200:
+                            continue
+                        content = await response.content.read(8 * 1024 * 1024)
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        if not content or (
+                            not content_type.startswith("image/")
+                            and not content.startswith((b"\xff\xd8\xff", b"\x89PNG"))
+                        ):
+                            continue
+                        with open(cache_path, "wb") as output:
+                            output.write(content)
+                        return cache_path
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    continue
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        pass
+
+    log.debug("Could not download thumbnail for %s", video_url or thumbnail_url)
+    return None
 
 
 def _entry_watch_url(entry: dict) -> str | None:
