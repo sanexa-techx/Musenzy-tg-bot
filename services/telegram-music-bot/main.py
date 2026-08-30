@@ -41,10 +41,8 @@ ON_RENDER = bool(os.environ.get("RENDER"))
 # ── YouTube cookies bootstrap ─────────────────────────────────────────────────
 
 def _bootstrap_cookies() -> None:
-    """Write cookies.txt from YOUTUBE_COOKIES_B64 if the file is missing."""
+    """Refresh cookies.txt from YOUTUBE_COOKIES_B64 when configured."""
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-    if os.path.exists(cookies_path):
-        return
     configured = os.environ.get("YOUTUBE_COOKIES_B64", "")
     if not configured.strip():
         return
