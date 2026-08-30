@@ -57,6 +57,10 @@ def _bootstrap_cookies() -> None:
             # Secret values may be copied without trailing "=" padding or with
             # line-wrapping, so normalize both before decoding.
             b64 = "".join(configured.split()).strip("\"'`")
+            if "base64," in b64:
+                b64 = b64.split("base64,", 1)[1]
+            # Also accept URL-safe base64 produced by some web tools.
+            b64 = b64.replace("-", "+").replace("_", "/")
             padded = b64 + "=" * (-len(b64) % 4)
             decoded = base64.b64decode(padded, validate=True).decode("utf-8")
         with open(cookies_path, "w") as f:
