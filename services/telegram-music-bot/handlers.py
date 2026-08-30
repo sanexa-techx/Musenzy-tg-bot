@@ -17,6 +17,7 @@ from broadcast import BroadcastManager
 from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
 from keyboards import (
     broadcast_schedule_menu,
+    player_card_editor_menu,
     player_controls,
     player_controls_api,
     player_button_editor_menu,
@@ -25,6 +26,7 @@ from keyboards import (
 from player import VoiceChatPlayer
 from player_button_config import (
     BUTTON_NAMES,
+    CARD_TEXT_NAMES,
     get_player_button_settings,
 )
 from playlist_manager import PlaylistManager
@@ -69,21 +71,29 @@ def _format_duration(seconds: int) -> str:
 
 
 def _format_track(track: Track, position: int | None = None) -> str:
+    settings = get_player_button_settings()
     duration = _format_duration(track.duration)
     title = html.escape(track.title)
-    requester = track.requested_by
+    requester = html.escape(track.requested_by)
+    divider = html.escape(settings.card("divider"))
+    song_prefix = html.escape(settings.card("song_prefix"))
+    time_prefix = html.escape(settings.card("time_prefix"))
+    requester_prefix = html.escape(settings.card("requester_prefix"))
+    separator = html.escape(settings.card("separator"))
     if position is None:
         return (
-            "🎵 <b>ɴᴏᴡ ᴘʟᴀʏɪɴɢ</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"🎧 <b>{title}</b>\n\n"
-            f"⏱ <code>{duration}</code>   ·   👤 {requester}"
+            f"<b>{html.escape(settings.card('now_playing'))}</b>\n"
+            f"{divider}\n\n"
+            f"{song_prefix} <b>{title}</b>\n\n"
+            f"{time_prefix} <code>{duration}</code>   {separator}   "
+            f"{requester_prefix} {requester}"
         )
     return (
-        f"✨ <b>ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ</b>  <code>#{position}</code>\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎧 <b>{title}</b>\n\n"
-        f"⏱ <code>{duration}</code>   ·   👤 {requester}"
+        f"<b>{html.escape(settings.card('queued'))}</b>  <code>#{position}</code>\n"
+        f"{divider}\n\n"
+        f"{song_prefix} <b>{title}</b>\n\n"
+        f"{time_prefix} <code>{duration}</code>   {separator}   "
+        f"{requester_prefix} {requester}"
     )
 
 
@@ -1122,6 +1132,44 @@ def register_handlers(
                 "Names: <code>pause</code>, <code>resume</code>, <code>skip</code>, "
                 "<code>stop</code>, <code>queue</code>, <code>close</code>, "
                 "<code>autoplay_on</code>, <code>autoplay_off</code>",
+                "",
+                "<b>Card text above the buttons:</b>",
+                "Tap <code>📝 Edit card text</code> to customize the heading, "
+                "song/time/requester labels, divider, and separator.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _player_card_editor_text() -> str:
+        settings = get_player_button_settings()
+        lines = [
+            "📝 <b>Player card text editor</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            "Change the text and emojis shown with the song title, duration, and requester.",
+            "The actual song name, time, and requester stay dynamic.",
+            "",
+            "<b>Current card text:</b>",
+        ]
+        for key, name in CARD_TEXT_NAMES.items():
+            lines.append(
+                f"• <b>{html.escape(name)}</b>: "
+                f"<code>{html.escape(settings.card(key))}</code>"
+            )
+        lines.extend(
+            [
+                "",
+                "Use:",
+                "<code>/setcard &lt;field&gt; &lt;new text&gt;</code>",
+                "",
+                "Fields: <code>now_playing</code>, <code>queued</code>, "
+                "<code>song_prefix</code>, <code>time_prefix</code>, "
+                "<code>requester_prefix</code>, <code>divider</code>, "
+                "<code>separator</code>",
+                "",
+                "Examples:",
+                "<code>/setcard now_playing 🎶 ɴᴏᴡ ᴘʟᴀʏɪɴɢ</code>",
+                "<code>/setcard requester_prefix Requested by</code>",
+                "<code>/setcard time_prefix Duration</code>",
             ]
         )
         return "\n".join(lines)
@@ -1210,6 +1258,35 @@ def register_handlers(
             parse_mode=enums.ParseMode.HTML,
         )
 
+    @bot.on_message(filters.command("setcard") & filters.private)
+    async def setcard_cmd(_client: Client, message: Message) -> None:
+        """Owner-only command to set text/symbols in the player card."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text(
+                _player_card_editor_text(),
+                parse_mode=enums.ParseMode.HTML,
+                reply_markup=player_card_editor_menu(),
+            )
+            return
+
+        settings = get_player_button_settings()
+        try:
+            key = settings.set_card_text(parts[1], parts[2])
+        except ValueError as exc:
+            await message.reply_text(f"❌ {html.escape(str(exc))}")
+            return
+
+        await message.reply_text(
+            f"✅ <b>{html.escape(CARD_TEXT_NAMES[key])}</b> updated to "
+            f"<code>{html.escape(settings.card(key))}</code>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
     @bot.on_message(filters.command("resetbuttons") & filters.private)
     async def resetbuttons_cmd(_client: Client, message: Message) -> None:
         """Owner-only reset to the original player keyboard."""
@@ -1262,6 +1339,26 @@ def register_handlers(
             )
             return
 
+        if action == "cardhelp":
+            with contextlib.suppress(Exception):
+                await query.answer()
+                await query.message.edit_text(
+                    _player_card_editor_text(),
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=player_card_editor_menu(),
+                )
+            return
+
+        if action == "back":
+            with contextlib.suppress(Exception):
+                await query.answer()
+                await query.message.edit_text(
+                    _player_button_editor_text(),
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=player_button_editor_menu(),
+                )
+            return
+
         if action == "reset":
             get_player_button_settings().reset()
             with contextlib.suppress(Exception):
@@ -1285,6 +1382,22 @@ def register_handlers(
                 f"✏️ Editing <b>{html.escape(BUTTON_NAMES[key])}</b>\n\n"
                 f"Send:\n<code>/setbutton {key} &lt;new label&gt;</code>\n\n"
                 f"Current: <code>{html.escape(get_player_button_settings().label(key))}</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        if action.startswith("editcard:"):
+            key = action.split(":", 1)[1]
+            if key not in CARD_TEXT_NAMES:
+                with contextlib.suppress(Exception):
+                    await query.answer("Unknown card field.", show_alert=True)
+                return
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                f"✏️ Editing <b>{html.escape(CARD_TEXT_NAMES[key])}</b>\n\n"
+                f"Send:\n<code>/setcard {key} &lt;new text&gt;</code>\n\n"
+                f"Current: <code>{html.escape(get_player_button_settings().card(key))}</code>",
                 parse_mode=enums.ParseMode.HTML,
             )
 

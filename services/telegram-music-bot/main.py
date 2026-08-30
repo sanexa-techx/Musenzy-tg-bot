@@ -183,6 +183,7 @@ async def run() -> None:
             BotCommand("playerbuttons", "🎛 Edit player card buttons"),
             BotCommand("setbutton", "✏️ Set a player button label"),
             BotCommand("setbuttonstyle", "🎨 Set a button color style"),
+            BotCommand("setcard", "📝 Set player card text"),
             BotCommand("resetbuttons", "♻️ Reset player buttons"),
         ]
         with contextlib.suppress(Exception):
