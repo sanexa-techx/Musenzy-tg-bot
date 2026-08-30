@@ -62,7 +62,18 @@ def _bootstrap_cookies() -> None:
             # Also accept URL-safe base64 produced by some web tools.
             b64 = b64.replace("-", "+").replace("_", "/")
             padded = b64 + "=" * (-len(b64) % 4)
-            decoded = base64.b64decode(padded, validate=True).decode("utf-8")
+            try:
+                decoded = base64.b64decode(padded, validate=True).decode("utf-8")
+            except Exception:
+                # Some terminals/web forms add a harmless non-ASCII wrapper
+                # character. Retry with only the base64 alphabet, then verify
+                # the decoded payload below before writing it.
+                alphabet = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+                filtered = "".join(char for char in b64 if char in alphabet)
+                filtered_padded = filtered + "=" * (-len(filtered) % 4)
+                decoded = base64.b64decode(filtered_padded, validate=True).decode("utf-8")
+        if not decoded.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
+            raise ValueError("decoded value is not a Netscape cookies.txt export")
         with open(cookies_path, "w") as f:
             f.write(decoded)
         log.info("cookies.txt written from YOUTUBE_COOKIES_B64")
