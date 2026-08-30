@@ -44,11 +44,21 @@ def _bootstrap_cookies() -> None:
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
     if os.path.exists(cookies_path):
         return
-    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
-    if not b64:
+    configured = os.environ.get("YOUTUBE_COOKIES_B64", "")
+    if not configured.strip():
         return
     try:
-        decoded = base64.b64decode(b64).decode("utf-8")
+        # Accept a protected raw Netscape export as well as base64. This makes
+        # the secret setup resilient to copy/paste mistakes without weakening
+        # validation for other input.
+        if configured.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
+            decoded = configured
+        else:
+            # Secret values may be copied without trailing "=" padding or with
+            # line-wrapping, so normalize both before decoding.
+            b64 = "".join(configured.split()).strip("\"'`")
+            padded = b64 + "=" * (-len(b64) % 4)
+            decoded = base64.b64decode(padded, validate=True).decode("utf-8")
         with open(cookies_path, "w") as f:
             f.write(decoded)
         log.info("cookies.txt written from YOUTUBE_COOKIES_B64")
