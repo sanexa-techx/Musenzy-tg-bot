@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import shutil
+import subprocess
 import time
 import uuid
 
@@ -415,6 +416,56 @@ def _extract_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _to_jpeg(content: bytes) -> bytes | None:
+    """Return Telegram-compatible JPEG bytes for any supported image input."""
+    if content.startswith(b"\xff\xd8\xff"):
+        return content
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-q:v",
+                "3",
+                "pipe:1",
+            ],
+            input=content,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8\xff"):
+            return result.stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _atomic_write(path: str, content: bytes) -> None:
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "wb") as output:
+            output.write(content)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
 async def download_thumbnail(
     thumbnail_url: str | None,
     video_url: str = "",
@@ -439,7 +490,14 @@ async def download_thumbnail(
     cache_path = os.path.join(DOWNLOAD_DIR, f"thumbnail-{cache_key}.jpg")
     try:
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1024:
-            return cache_path
+            with open(cache_path, "rb") as cached_file:
+                cached_content = cached_file.read(8 * 1024 * 1024)
+            cached_jpeg = await asyncio.to_thread(_to_jpeg, cached_content)
+            if cached_jpeg:
+                if not cached_content.startswith(b"\xff\xd8\xff"):
+                    await asyncio.to_thread(_atomic_write, cache_path, cached_jpeg)
+                return cache_path
+            os.remove(cache_path)
     except OSError:
         pass
 
@@ -467,11 +525,15 @@ async def download_thumbnail(
                         content_type = response.headers.get("Content-Type", "").lower()
                         if not content or (
                             not content_type.startswith("image/")
-                            and not content.startswith((b"\xff\xd8\xff", b"\x89PNG"))
+                            and not content.startswith(
+                                (b"\xff\xd8\xff", b"\x89PNG", b"RIFF", b"GIF8")
+                            )
                         ):
                             continue
-                        with open(cache_path, "wb") as output:
-                            output.write(content)
+                        jpeg = await asyncio.to_thread(_to_jpeg, content)
+                        if not jpeg:
+                            continue
+                        await asyncio.to_thread(_atomic_write, cache_path, jpeg)
                         return cache_path
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
                     continue
