@@ -33,6 +33,16 @@ DEFAULT_STYLES: dict[str, str] = {
     "autoplay_off": "danger",
 }
 
+DEFAULT_CARD_TEXT: dict[str, str] = {
+    "now_playing": "🎵 ɴᴏᴡ ᴘʟᴀʏɪɴɢ",
+    "queued": "✨ ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ",
+    "divider": "━━━━━━━━━━━━━━━━━━",
+    "song_prefix": "🎧",
+    "time_prefix": "⏱",
+    "requester_prefix": "👤",
+    "separator": "·",
+}
+
 BUTTON_NAMES: dict[str, str] = {
     "pause": "Pause",
     "resume": "Resume",
@@ -42,6 +52,16 @@ BUTTON_NAMES: dict[str, str] = {
     "close": "Close",
     "autoplay_on": "Autoplay enabled",
     "autoplay_off": "Autoplay disabled",
+}
+
+CARD_TEXT_NAMES: dict[str, str] = {
+    "now_playing": "Now-playing heading",
+    "queued": "Queue heading",
+    "divider": "Divider",
+    "song_prefix": "Song label",
+    "time_prefix": "Time label",
+    "requester_prefix": "Requester label",
+    "separator": "Detail separator",
 }
 
 BUTTON_ALIASES: dict[str, str] = {
@@ -62,6 +82,27 @@ BUTTON_ALIASES: dict[str, str] = {
     "auto_off": "autoplay_off",
 }
 
+CARD_TEXT_ALIASES: dict[str, str] = {
+    "now_playing": "now_playing",
+    "now": "now_playing",
+    "heading": "now_playing",
+    "queued": "queued",
+    "queue_heading": "queued",
+    "queue": "queued",
+    "divider": "divider",
+    "line": "divider",
+    "song": "song_prefix",
+    "song_prefix": "song_prefix",
+    "time": "time_prefix",
+    "duration": "time_prefix",
+    "time_prefix": "time_prefix",
+    "requester": "requester_prefix",
+    "requested_by": "requester_prefix",
+    "requester_prefix": "requester_prefix",
+    "separator": "separator",
+    "sep": "separator",
+}
+
 VALID_STYLES = frozenset({"primary", "success", "danger"})
 
 
@@ -74,8 +115,7 @@ def _load() -> dict[str, Any]:
         return {}
 
 
-def _save(labels: dict[str, str], styles: dict[str, str]) -> None:
-    payload = {"labels": labels, "styles": styles}
+def _save_state(payload: dict[str, Any]) -> None:
     temporary = f"{_STATE_FILE}.tmp"
     with contextlib.suppress(Exception):
         with open(temporary, "w", encoding="utf-8") as state_file:
@@ -90,8 +130,10 @@ class PlayerButtonSettings:
         raw = _load()
         saved_labels = raw.get("labels", {})
         saved_styles = raw.get("styles", {})
+        saved_card_text = raw.get("card_text", {})
         self.labels = dict(DEFAULT_LABELS)
         self.styles = dict(DEFAULT_STYLES)
+        self.card_text = dict(DEFAULT_CARD_TEXT)
 
         if isinstance(saved_labels, dict):
             for key, value in saved_labels.items():
@@ -102,6 +144,11 @@ class PlayerButtonSettings:
             for key, value in saved_styles.items():
                 if key in self.styles and value in VALID_STYLES:
                     self.styles[key] = value
+        if isinstance(saved_card_text, dict):
+            for key, value in saved_card_text.items():
+                if key in self.card_text and isinstance(value, str):
+                    with contextlib.suppress(ValueError):
+                        self.card_text[key] = self.validate_label(value)
 
     @staticmethod
     def validate_label(label: str) -> str:
@@ -124,12 +171,21 @@ class PlayerButtonSettings:
     def style(self, key: str) -> str:
         return self.styles[key]
 
+    def card(self, key: str) -> str:
+        return self.card_text[key]
+
     def set_label(self, name: str, label: str) -> str:
         key = self.resolve_key(name)
         if key is None:
             raise ValueError("Unknown button name.")
         self.labels[key] = self.validate_label(label)
-        _save(self.labels, self.styles)
+        _save_state(
+            {
+                "labels": self.labels,
+                "styles": self.styles,
+                "card_text": self.card_text,
+            }
+        )
         return key
 
     def set_style(self, name: str, style: str) -> str:
@@ -140,13 +196,40 @@ class PlayerButtonSettings:
         if style not in VALID_STYLES:
             raise ValueError("Style must be primary, success, or danger.")
         self.styles[key] = style
-        _save(self.labels, self.styles)
+        _save_state(
+            {
+                "labels": self.labels,
+                "styles": self.styles,
+                "card_text": self.card_text,
+            }
+        )
+        return key
+
+    def set_card_text(self, name: str, value: str) -> str:
+        key = CARD_TEXT_ALIASES.get(name.strip().lower())
+        if key is None:
+            raise ValueError("Unknown card text field.")
+        self.card_text[key] = self.validate_label(value)
+        _save_state(
+            {
+                "labels": self.labels,
+                "styles": self.styles,
+                "card_text": self.card_text,
+            }
+        )
         return key
 
     def reset(self) -> None:
         self.labels = dict(DEFAULT_LABELS)
         self.styles = dict(DEFAULT_STYLES)
-        _save(self.labels, self.styles)
+        self.card_text = dict(DEFAULT_CARD_TEXT)
+        _save_state(
+            {
+                "labels": self.labels,
+                "styles": self.styles,
+                "card_text": self.card_text,
+            }
+        )
 
 
 _SETTINGS = PlayerButtonSettings()

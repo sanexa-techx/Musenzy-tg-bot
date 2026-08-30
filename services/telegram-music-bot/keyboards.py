@@ -68,8 +68,37 @@ def player_button_editor_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👁 Preview", callback_data="pbtn:preview"),
             ],
             [
+                InlineKeyboardButton("📝 Edit card text", callback_data="pbtn:cardhelp"),
+            ],
+            [
                 InlineKeyboardButton("♻️ Reset all", callback_data="pbtn:reset"),
                 InlineKeyboardButton("✖️ Close", callback_data="pbtn:close"),
+            ],
+        ]
+    )
+
+
+def player_card_editor_menu() -> InlineKeyboardMarkup:
+    """Owner menu for editing the text and symbols above the player buttons."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✏️ Now playing", callback_data="pbtn:editcard:now_playing"),
+                InlineKeyboardButton("✏️ Queue heading", callback_data="pbtn:editcard:queued"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Song label", callback_data="pbtn:editcard:song_prefix"),
+                InlineKeyboardButton("✏️ Time label", callback_data="pbtn:editcard:time_prefix"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Requested by", callback_data="pbtn:editcard:requester_prefix"),
+                InlineKeyboardButton("✏️ Divider", callback_data="pbtn:editcard:divider"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Separator", callback_data="pbtn:editcard:separator"),
+            ],
+            [
+                InlineKeyboardButton("↩️ Back to buttons", callback_data="pbtn:back"),
             ],
         ]
     )
