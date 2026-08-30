@@ -418,8 +418,6 @@ def _extract_video_id(url: str) -> str | None:
 
 def _to_jpeg(content: bytes) -> bytes | None:
     """Return Telegram-compatible JPEG bytes for any supported image input."""
-    if content.startswith(b"\xff\xd8\xff"):
-        return content
     try:
         result = subprocess.run(
             [
@@ -505,8 +503,11 @@ async def download_thumbnail(
     if thumbnail_url:
         candidates.append(thumbnail_url)
     if video_id:
-        for quality in ("maxresdefault", "hqdefault", "sddefault", "default"):
-            candidates.append(f"https://i.ytimg.com/vi/{video_id}/{quality}.jpg")
+        for host in ("i.ytimg.com", "img.youtube.com"):
+            for quality in ("maxresdefault", "hqdefault", "sddefault", "default"):
+                candidates.append(
+                    f"https://{host}/vi/{video_id}/{quality}.jpg"
+                )
 
     unique_candidates = list(dict.fromkeys(candidates))
     if not unique_candidates:
