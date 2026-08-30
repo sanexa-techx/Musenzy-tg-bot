@@ -2,6 +2,7 @@
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import OWNER_URL, SUPPORT_GROUP_URL
+from player_button_config import get_player_button_settings
 from progress import render_bar_button
 
 
@@ -42,6 +43,38 @@ def welcome_menu() -> InlineKeyboardMarkup:
     )
 
 
+def player_button_editor_menu() -> InlineKeyboardMarkup:
+    """Owner menu for editing the now-playing keyboard labels."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✏️ Pause", callback_data="pbtn:edit:pause"),
+                InlineKeyboardButton("✏️ Resume", callback_data="pbtn:edit:resume"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Skip", callback_data="pbtn:edit:skip"),
+                InlineKeyboardButton("✏️ Stop", callback_data="pbtn:edit:stop"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Queue", callback_data="pbtn:edit:queue"),
+                InlineKeyboardButton("✏️ Close", callback_data="pbtn:edit:close"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Auto ON", callback_data="pbtn:edit:autoplay_on"),
+                InlineKeyboardButton("✏️ Auto OFF", callback_data="pbtn:edit:autoplay_off"),
+            ],
+            [
+                InlineKeyboardButton("🎨 Style help", callback_data="pbtn:stylehelp"),
+                InlineKeyboardButton("👁 Preview", callback_data="pbtn:preview"),
+            ],
+            [
+                InlineKeyboardButton("♻️ Reset all", callback_data="pbtn:reset"),
+                InlineKeyboardButton("✖️ Close", callback_data="pbtn:close"),
+            ],
+        ]
+    )
+
+
 _FALLBACK_URL = "https://youtube.com"
 
 
@@ -52,6 +85,7 @@ def player_controls(
     track_url: str = "",
     autoplay_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
+    settings = get_player_button_settings()
     bar_label = render_bar_button(elapsed, duration, paused)
     # URL buttons render in Telegram's accent colour (blue).
     # Callback buttons render in the neutral/grey message colour.
@@ -63,15 +97,18 @@ def player_controls(
                 InlineKeyboardButton(bar_label, url=bar_url),
             ],
             [
-                InlineKeyboardButton("▶️" if paused else "⏸", callback_data="ctl:pauseresume"),
-                InlineKeyboardButton("⏭", callback_data="ctl:skip"),
-                InlineKeyboardButton("⏹", callback_data="ctl:stop"),
-                InlineKeyboardButton("🎵", callback_data="ctl:queue"),
-                InlineKeyboardButton("✖️", callback_data="ctl:close"),
+                InlineKeyboardButton(
+                    settings.label("resume" if paused else "pause"),
+                    callback_data="ctl:pauseresume",
+                ),
+                InlineKeyboardButton(settings.label("skip"), callback_data="ctl:skip"),
+                InlineKeyboardButton(settings.label("stop"), callback_data="ctl:stop"),
+                InlineKeyboardButton(settings.label("queue"), callback_data="ctl:queue"),
+                InlineKeyboardButton(settings.label("close"), callback_data="ctl:close"),
             ],
             [
                 InlineKeyboardButton(
-                    "✔️ 𝙰𝚄𝚃𝙾" if autoplay_enabled else "𝙰𝚄𝚃𝙾",
+                    settings.label("autoplay_on" if autoplay_enabled else "autoplay_off"),
                     callback_data="ctl:autoplay",
                 ),
             ],
@@ -92,6 +129,7 @@ def player_controls_api(
     This is a JSON payload because the installed Pyrofork model predates the
     Bot API 9.4 ``style`` property.
     """
+    settings = get_player_button_settings()
     bar_label = render_bar_button(elapsed, duration, paused)
     bar_url = track_url if track_url else _FALLBACK_URL
 
@@ -114,19 +152,35 @@ def player_controls_api(
             [button(bar_label, style="primary", url=bar_url)],
             [
                 button(
-                    "▶️" if paused else "⏸",
-                    style="success",
+                    settings.label("resume" if paused else "pause"),
+                    style=settings.style("resume" if paused else "pause"),
                     callback_data="ctl:pauseresume",
                 ),
-                button("⏭", style="primary", callback_data="ctl:skip"),
-                button("⏹", style="danger", callback_data="ctl:stop"),
-                button("🎵", style="primary", callback_data="ctl:queue"),
-                button("✖️", style="danger", callback_data="ctl:close"),
+                button(
+                    settings.label("skip"),
+                    style=settings.style("skip"),
+                    callback_data="ctl:skip",
+                ),
+                button(
+                    settings.label("stop"),
+                    style=settings.style("stop"),
+                    callback_data="ctl:stop",
+                ),
+                button(
+                    settings.label("queue"),
+                    style=settings.style("queue"),
+                    callback_data="ctl:queue",
+                ),
+                button(
+                    settings.label("close"),
+                    style=settings.style("close"),
+                    callback_data="ctl:close",
+                ),
             ],
             [
                 button(
-                    "✔️ 𝙰𝚄𝚃𝙾" if autoplay_enabled else "𝙰𝚄𝚃𝙾",
-                    style="success" if autoplay_enabled else "danger",
+                    settings.label("autoplay_on" if autoplay_enabled else "autoplay_off"),
+                    style=settings.style("autoplay_on" if autoplay_enabled else "autoplay_off"),
                     callback_data="ctl:autoplay",
                 ),
             ],

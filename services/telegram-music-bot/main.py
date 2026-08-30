@@ -180,6 +180,10 @@ async def run() -> None:
         owner_commands = public_commands + [
             BotCommand("broadcast", "📢 Broadcast a message to all groups"),
             BotCommand("groups",    "👥 List all groups the bot is in"),
+            BotCommand("playerbuttons", "🎛 Edit player card buttons"),
+            BotCommand("setbutton", "✏️ Set a player button label"),
+            BotCommand("setbuttonstyle", "🎨 Set a button color style"),
+            BotCommand("resetbuttons", "♻️ Reset player buttons"),
         ]
         with contextlib.suppress(Exception):
             await bot.set_bot_commands(

@@ -19,9 +19,14 @@ from keyboards import (
     broadcast_schedule_menu,
     player_controls,
     player_controls_api,
+    player_button_editor_menu,
     welcome_menu,
 )
 from player import VoiceChatPlayer
+from player_button_config import (
+    BUTTON_NAMES,
+    get_player_button_settings,
+)
 from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
@@ -1089,6 +1094,199 @@ def register_handlers(
 
     def _is_owner(user_id: int) -> bool:
         return OWNER_ID != 0 and user_id == OWNER_ID
+
+    def _player_button_editor_text() -> str:
+        settings = get_player_button_settings()
+        lines = [
+            "🎛 <b>Player button editor</b>",
+            "━━━━━━━━━━━━━━━━━━",
+            "Customize the labels and emojis on every now-playing card.",
+            "Unicode fonts, symbols, and emojis are supported.",
+            "",
+            "<b>Current labels:</b>",
+        ]
+        for key, name in BUTTON_NAMES.items():
+            style = settings.style(key)
+            lines.append(
+                f"• <b>{html.escape(name)}</b>: "
+                f"<code>{html.escape(settings.label(key))}</code> "
+                f"· <i>{style}</i>"
+            )
+        lines.extend(
+            [
+                "",
+                "Tap a button below, then use:",
+                "<code>/setbutton &lt;name&gt; &lt;new label&gt;</code>",
+                "<code>/setbuttonstyle &lt;name&gt; &lt;primary|success|danger&gt;</code>",
+                "",
+                "Names: <code>pause</code>, <code>resume</code>, <code>skip</code>, "
+                "<code>stop</code>, <code>queue</code>, <code>close</code>, "
+                "<code>autoplay_on</code>, <code>autoplay_off</code>",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _player_button_style_help() -> str:
+        return (
+            "🎨 <b>Button styles</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "<code>primary</code> — blue\n"
+            "<code>success</code> — green\n"
+            "<code>danger</code> — red\n\n"
+            "Example:\n"
+            "<code>/setbuttonstyle skip success</code>\n\n"
+            "The label command accepts any Unicode text, for example:\n"
+            "<code>/setbutton skip ⏩ NEXT</code>"
+        )
+
+    @bot.on_message(filters.command("playerbuttons") & filters.private)
+    async def playerbuttons_cmd(_client: Client, message: Message) -> None:
+        """Owner-only editor for the labels/styles on player cards."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+        await message.reply_text(
+            _player_button_editor_text(),
+            parse_mode=enums.ParseMode.HTML,
+            reply_markup=player_button_editor_menu(),
+        )
+
+    @bot.on_message(filters.command("setbutton") & filters.private)
+    async def setbutton_cmd(_client: Client, message: Message) -> None:
+        """Owner-only command to set a player button's Unicode label."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text(
+                "Usage: <code>/setbutton &lt;name&gt; &lt;new label&gt;</code>\n"
+                "Example: <code>/setbutton queue 🎶 QUEUE</code>\n\n"
+                "Open <code>/playerbuttons</code> for all button names.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        settings = get_player_button_settings()
+        try:
+            key = settings.set_label(parts[1], parts[2])
+        except ValueError as exc:
+            await message.reply_text(f"❌ {html.escape(str(exc))}")
+            return
+
+        await message.reply_text(
+            f"✅ <b>{html.escape(BUTTON_NAMES[key])}</b> label updated to "
+            f"<code>{html.escape(settings.label(key))}</code>.\n"
+            "New and active player cards will use it.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("setbuttonstyle") & filters.private)
+    async def setbuttonstyle_cmd(_client: Client, message: Message) -> None:
+        """Owner-only command to set a Bot API button style."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text(
+                _player_button_style_help(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        settings = get_player_button_settings()
+        try:
+            key = settings.set_style(parts[1], parts[2])
+        except ValueError as exc:
+            await message.reply_text(f"❌ {html.escape(str(exc))}")
+            return
+
+        await message.reply_text(
+            f"✅ <b>{html.escape(BUTTON_NAMES[key])}</b> style set to "
+            f"<code>{html.escape(settings.style(key))}</code>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    @bot.on_message(filters.command("resetbuttons") & filters.private)
+    async def resetbuttons_cmd(_client: Client, message: Message) -> None:
+        """Owner-only reset to the original player keyboard."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+        get_player_button_settings().reset()
+        await message.reply_text(
+            "♻️ Player button labels and styles have been reset to defaults.",
+            reply_markup=player_button_editor_menu(),
+        )
+
+    @bot.on_callback_query(filters.regex(r"^pbtn:"))
+    async def playerbuttons_cb(_client: Client, query: CallbackQuery) -> None:
+        """Handle the owner editor menu."""
+        if not _is_owner(query.from_user.id):
+            with contextlib.suppress(Exception):
+                await query.answer("🚫 Owner only.", show_alert=True)
+            return
+
+        action = query.data.split(":", 1)[1]
+        if action == "close":
+            with contextlib.suppress(Exception):
+                await query.answer()
+                await query.message.delete()
+            return
+
+        if action == "preview":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                "👁 <b>Player card preview</b>",
+                parse_mode=enums.ParseMode.HTML,
+                reply_markup=player_controls(
+                    paused=False,
+                    elapsed=83,
+                    duration=245,
+                    track_url="https://youtube.com",
+                    autoplay_enabled=True,
+                ),
+            )
+            return
+
+        if action == "stylehelp":
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                _player_button_style_help(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        if action == "reset":
+            get_player_button_settings().reset()
+            with contextlib.suppress(Exception):
+                await query.answer("Reset to defaults.")
+                await query.message.edit_text(
+                    _player_button_editor_text(),
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=player_button_editor_menu(),
+                )
+            return
+
+        if action.startswith("edit:"):
+            key = action.split(":", 1)[1]
+            if key not in BUTTON_NAMES:
+                with contextlib.suppress(Exception):
+                    await query.answer("Unknown button.", show_alert=True)
+                return
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                f"✏️ Editing <b>{html.escape(BUTTON_NAMES[key])}</b>\n\n"
+                f"Send:\n<code>/setbutton {key} &lt;new label&gt;</code>\n\n"
+                f"Current: <code>{html.escape(get_player_button_settings().label(key))}</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
 
     @bot.on_message(filters.command("groups") & filters.private)
     async def groups_cmd(client: Client, message: Message) -> None:
