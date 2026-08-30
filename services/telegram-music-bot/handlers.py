@@ -12,7 +12,7 @@ from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlrea
 from pyrogram.types import CallbackQuery, Message
 
 from autoplay import AutoplayManager
-from bot_api import BotApiClient, BotApiError, BotApiMessage
+from bot_api import BotApiClient, BotApiMessage
 from broadcast import BroadcastManager
 from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
 from keyboards import (
@@ -259,11 +259,10 @@ def register_handlers(
         """Sends a fresh "now playing" message and starts its live progress
         bar. Fires on every track start -- the initial /play, /skip, button
         skips, and automatic advance when a track finishes."""
-        # Delete the previous Now Playing card before posting the new one.
+        # Keep the previous card until the replacement is actually delivered.
+        # Deleting it first leaves the chat with no card when Telegram rejects
+        # a photo upload or the Bot API is temporarily unavailable.
         old_message = tracker.current_message(chat_id)
-        if old_message is not None:
-            with contextlib.suppress(Exception):
-                await old_message.delete()
 
         caption = _format_track(track)
         # Record in play history so autoplay avoids repeating this song.
@@ -273,7 +272,11 @@ def register_handlers(
         # Upload a local copy when possible. Telegram cannot always fetch
         # YouTube's remote thumbnail URL reliably.
         try:
-            local_thumbnail = await download_thumbnail(track.thumbnail, track.url)
+            # Do not let artwork retrieval block the now-playing card forever.
+            local_thumbnail = await asyncio.wait_for(
+                download_thumbnail(track.thumbnail, track.url),
+                timeout=8,
+            )
         except Exception:
             log.warning(
                 "Thumbnail preparation failed for chat %s",
@@ -291,77 +294,86 @@ def register_handlers(
             track_url=track.url,
             autoplay_enabled=autoplayer.is_enabled(chat_id),
         )
-        try:
-            photo = local_thumbnail or track.thumbnail
-            if photo:
+        fallback_markup = player_controls(
+            paused=False,
+            elapsed=0,
+            duration=track.duration,
+            track_url=track.url,
+            autoplay_enabled=autoplayer.is_enabled(chat_id),
+        )
+        photo = local_thumbnail or track.thumbnail
+        message = None
+
+        # Try styled photo delivery first, then native photo delivery. Every
+        # photo failure must continue to a text-card fallback so playback
+        # never loses its now-playing message.
+        if photo:
+            try:
+                message = await bot_api.send_photo(
+                    chat_id,
+                    photo,
+                    caption,
+                    reply_markup=initial_markup,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Bot API thumbnail delivery failed for chat %s: %s",
+                    chat_id,
+                    exc,
+                )
+            if message is None:
                 try:
-                    message = await bot_api.send_photo(
+                    message = await bot.send_photo(
                         chat_id,
                         photo,
-                        caption,
-                        reply_markup=initial_markup,
+                        caption=caption,
+                        reply_markup=fallback_markup,
+                        parse_mode=enums.ParseMode.HTML,
                     )
-                except BotApiError:
+                except FloodWait as exc:
                     log.warning(
-                        "Could not send thumbnail through Bot API for chat %s; "
-                        "falling back to native photo delivery",
+                        "FloodWait %ds on native thumbnail delivery for chat %s",
+                        exc.value,
                         chat_id,
                     )
-                    raise
-            else:
+                    await asyncio.sleep(min(exc.value, 10))
+                except Exception as exc:
+                    log.warning(
+                        "Native thumbnail delivery failed for chat %s: %s",
+                        chat_id,
+                        exc,
+                    )
+
+        # Text is a final, reliable card fallback for bad image formats,
+        # inaccessible remote thumbnails, and transient photo API failures.
+        if message is None:
+            try:
                 message = await bot_api.send_message(
                     chat_id,
                     caption,
                     reply_markup=initial_markup,
                 )
-        except Exception:
-            # Keep playback usable if Telegram temporarily rejects the new
-            # Bot API field or the HTTP API is unavailable.
-            log.exception(
-                "Styled now-playing post failed for chat %s; using Pyrofork fallback",
-                chat_id,
-            )
-            try:
-                fallback_markup = player_controls(
-                    paused=False,
-                    elapsed=0,
-                    duration=track.duration,
-                    track_url=track.url,
-                    autoplay_enabled=autoplayer.is_enabled(chat_id),
+            except Exception as exc:
+                log.warning(
+                    "Bot API text-card delivery failed for chat %s: %s",
+                    chat_id,
+                    exc,
                 )
-                photo = local_thumbnail or track.thumbnail
-                if photo:
-                    try:
-                        message = await bot.send_photo(
-                            chat_id,
-                            photo,
-                            caption=caption,
-                            reply_markup=fallback_markup,
-                            parse_mode=enums.ParseMode.HTML,
-                        )
-                    except FloodWait as e:
-                        log.warning(
-                            "FloodWait %ds on send_photo for chat %s — falling back to text",
-                            e.value,
-                            chat_id,
-                        )
-                        await asyncio.sleep(min(e.value, 10))
-                        message = await bot.send_message(
-                            chat_id,
-                            caption,
-                            reply_markup=fallback_markup,
-                            parse_mode=enums.ParseMode.HTML,
-                        )
-                else:
-                    message = await bot.send_message(
-                        chat_id,
-                        caption,
-                        reply_markup=fallback_markup,
-                        parse_mode=enums.ParseMode.HTML,
-                    )
+        if message is None:
+            try:
+                message = await bot.send_message(
+                    chat_id,
+                    caption,
+                    reply_markup=fallback_markup,
+                    parse_mode=enums.ParseMode.HTML,
+                )
             except Exception:
                 log.exception("Failed to post now-playing message for chat %s", chat_id)
                 return
+
+        if old_message is not None:
+            with contextlib.suppress(Exception):
+                await old_message.delete()
 
         if isinstance(message, BotApiMessage):
             progress_markup = lambda e, d, p, cid=chat_id: _controls(cid, e, d)
