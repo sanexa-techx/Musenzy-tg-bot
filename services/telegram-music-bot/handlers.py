@@ -12,7 +12,7 @@ from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlrea
 from pyrogram.types import CallbackQuery, Message
 
 from autoplay import AutoplayManager
-from bot_api import BotApiClient, BotApiError
+from bot_api import BotApiClient, BotApiError, BotApiMessage
 from broadcast import BroadcastManager
 from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
 from keyboards import (
@@ -28,7 +28,7 @@ from queue_manager import QueueManager, Track
 from youtube import (
     TrackNotFound, TrackTooLong, YouTubeBlocked,
     download_thumbnail, fetch_playlist_entries, get_related_track,
-    resolve_and_download, resolve_stream_url,
+    resolve_and_download, resolve_stream_url, resolve_video_stream_url,
     _extract_video_id,
 )
 
@@ -42,6 +42,7 @@ _seen_callback_ids: set[str] = set()
 COMMANDS_TEXT = (
     "Commands:\n"
     "/play <song name or link> -- play or queue a track\n"
+    "/vplay <video name or link> -- play video in the voice chat\n"
     "/skip -- skip the current track\n"
     "/pause -- pause playback\n"
     "/resume -- resume playback\n"
@@ -303,14 +304,10 @@ def register_handlers(
                 except BotApiError:
                     log.warning(
                         "Could not send thumbnail through Bot API for chat %s; "
-                        "falling back to styled text",
+                        "falling back to native photo delivery",
                         chat_id,
                     )
-                    message = await bot_api.send_message(
-                        chat_id,
-                        caption,
-                        reply_markup=initial_markup,
-                    )
+                    raise
             else:
                 message = await bot_api.send_message(
                     chat_id,
@@ -365,9 +362,20 @@ def register_handlers(
             except Exception:
                 log.exception("Failed to post now-playing message for chat %s", chat_id)
                 return
+
+        if isinstance(message, BotApiMessage):
+            progress_markup = lambda e, d, p, cid=chat_id: _controls(cid, e, d)
+        else:
+            progress_markup = lambda e, d, p, cid=chat_id: player_controls(
+                paused=p,
+                elapsed=e,
+                duration=d,
+                track_url=_track_urls.get(cid, ""),
+                autoplay_enabled=autoplayer.is_enabled(cid),
+            )
         tracker.start(
             chat_id, message, track.duration, caption,
-            lambda e, d, p, cid=chat_id: _controls(cid, e, d),
+            progress_markup,
         )
 
     async def _post_queue_empty(chat_id: int) -> None:
@@ -457,7 +465,8 @@ def register_handlers(
         caption = (
             f"Welcome {user} ,this is Musenzy a powerfull,free,music bot for you\n\n"
             "Add me to a group as admin with \"Invite users via link\" permission, start the group's "
-            "voice chat, then use /play <song name or link> -- I'll bring the music assistant in "
+            "voice chat, then use /play <song name or link> for audio or "
+            "/vplay <video name or link> for video -- I'll bring the music assistant in "
             "automatically. Works independently in every group I'm in."
         )
         await message.reply_photo(LOGO_PATH, caption=caption, reply_markup=welcome_menu())
@@ -467,8 +476,13 @@ def register_handlers(
         await query.answer()
         await query.message.reply_text(COMMANDS_TEXT)
 
-    @bot.on_message(filters.command("play") & filters.group)
-    async def play_cmd(client: Client, message: Message) -> None:
+    async def _play_media_command(
+        client: Client,
+        message: Message,
+        *,
+        video: bool = False,
+    ) -> None:
+        command_name = "vplay" if video else "play"
         # Drop duplicate deliveries of the same message (Telegram re-sends
         # unacknowledged updates when the bot is slow, e.g. during yt-dlp fetch).
         if message.id in _seen_message_ids:
@@ -484,7 +498,13 @@ def register_handlers(
         query = message.text.split(maxsplit=1)
         chat_id = message.chat.id
         if len(query) < 2:
-            asyncio.create_task(_send_and_delete(chat_id, bot, "Usage: /play <song name or YouTube link>"))
+            asyncio.create_task(
+                _send_and_delete(
+                    chat_id,
+                    bot,
+                    f"Usage: /{command_name} <song name or YouTube link>",
+                )
+            )
             with contextlib.suppress(Exception):
                 await message.delete()
             return
@@ -505,7 +525,7 @@ def register_handlers(
             return
 
         async with lock:
-            # Delete the /play command immediately.
+            # Delete the command immediately.
             with contextlib.suppress(Exception):
                 await message.delete()
 
@@ -515,10 +535,14 @@ def register_handlers(
                 searching_msg = await bot.send_message(chat_id, "🔍")
 
             try:
-                # Resolve the direct audio URL instead of downloading and
-                # re-encoding the whole track. This makes /play start much
-                # faster while preserving YouTube's original best audio.
-                info = await resolve_stream_url(query[1])
+                if video:
+                    # Resolve separate direct video and audio URLs. PyTgCalls
+                    # combines them into a video voice-chat stream.
+                    info = await resolve_video_stream_url(query[1])
+                else:
+                    # Resolve the direct audio URL instead of downloading and
+                    # re-encoding the whole track.
+                    info = await resolve_stream_url(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:
@@ -549,9 +573,13 @@ def register_handlers(
                     if searching_msg:
                         await searching_msg.delete()
                 log.exception("Failed to resolve track for chat %s", chat_id)
-                asyncio.create_task(
-                    _send_and_delete(chat_id, bot, "❌ Could not fetch that track right now.")
-                )
+                asyncio.create_task(_send_and_delete(
+                    chat_id,
+                    bot,
+                    "❌ Could not fetch that video right now."
+                    if video
+                    else "❌ Could not fetch that track right now.",
+                ))
                 return
             finally:
                 with contextlib.suppress(Exception):
@@ -571,6 +599,8 @@ def register_handlers(
                 thumbnail=info["thumbnail"],
                 requested_by=requester,
                 file_path=info["file_path"],
+                is_video=video,
+                audio_path=info.get("audio_path") if video else None,
             )
 
             position = await player.play_or_enqueue(message.chat.id, track)
@@ -593,6 +623,14 @@ def register_handlers(
                 else:
                     await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
             # position == 0: on_track_start already posted the "Now playing" card.
+
+    @bot.on_message(filters.command("play") & filters.group)
+    async def play_cmd(client: Client, message: Message) -> None:
+        await _play_media_command(client, message)
+
+    @bot.on_message(filters.command("vplay") & filters.group)
+    async def vplay_cmd(client: Client, message: Message) -> None:
+        await _play_media_command(client, message, video=True)
 
     @bot.on_message(filters.command("skip") & filters.group)
     async def skip_cmd(client: Client, message: Message) -> None:

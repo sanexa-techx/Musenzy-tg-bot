@@ -58,6 +58,12 @@ _AUDIO_FORMAT = (
     "/bestaudio"
 )
 
+_VIDEO_FORMAT = (
+    "bestvideo[height<=720]+bestaudio"
+    "/best[height<=720]"
+    "/best"
+)
+
 # ── Shared yt-dlp option blocks ───────────────────────────────────────────────
 _COMMON_OPTS: dict = {
     "noplaylist": True,
@@ -73,6 +79,14 @@ _SEARCH_OPTS: dict = {
     **_COMMON_OPTS,
     **_base_opts(),
     "format": _AUDIO_FORMAT,
+    "default_search": "ytsearch1",
+    "skip_download": True,
+}
+
+_VIDEO_SEARCH_OPTS: dict = {
+    **_COMMON_OPTS,
+    **_base_opts(),
+    "format": _VIDEO_FORMAT,
     "default_search": "ytsearch1",
     "skip_download": True,
 }
@@ -138,9 +152,9 @@ class YouTubeBlocked(Exception):
 
 # ── Sync helpers (run in thread executor) ─────────────────────────────────────
 
-def _extract_info_sync(query: str) -> dict:
+def _extract_info_sync(query: str, opts: dict | None = None) -> dict:
     try:
-        with yt_dlp.YoutubeDL(_SEARCH_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(opts or _SEARCH_OPTS) as ydl:
             info = ydl.extract_info(query, download=False)
     except yt_dlp.utils.DownloadError as exc:
         message = str(exc).lower()
@@ -225,6 +239,83 @@ async def resolve_stream_url(query: str) -> dict:
             _cache_set(key, result)
             return result
 
+        except (TrackNotFound, TrackTooLong):
+            raise
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    raise last_exc  # type: ignore[misc]
+
+
+async def resolve_video_stream_url(query: str) -> dict:
+    """Resolve a YouTube result to separate direct video and audio URLs."""
+    key = f"video:{_ck(query)}"
+    cached = _cache_get(key)
+    if cached:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    last_exc: Exception | None = None
+
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(1)
+        try:
+            info = await loop.run_in_executor(
+                None,
+                _extract_info_sync,
+                query,
+                _VIDEO_SEARCH_OPTS,
+            )
+            duration = int(info.get("duration") or 0)
+            if duration and duration > MAX_TRACK_SECONDS:
+                raise TrackTooLong(
+                    f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit"
+                )
+
+            requested_formats = info.get("requested_formats") or []
+            video_format = next(
+                (
+                    item
+                    for item in requested_formats
+                    if item.get("vcodec") not in (None, "none")
+                ),
+                None,
+            )
+            audio_format = next(
+                (
+                    item
+                    for item in requested_formats
+                    if item.get("acodec") not in (None, "none")
+                ),
+                None,
+            )
+
+            video_url = (video_format or {}).get("url")
+            audio_url = (audio_format or {}).get("url")
+            if not video_url and info.get("vcodec") not in (None, "none"):
+                video_url = info.get("url")
+            if not audio_url and info.get("acodec") not in (None, "none"):
+                audio_url = info.get("url")
+            if not video_url:
+                raise TrackNotFound(query)
+
+            video_page_url = (
+                info.get("webpage_url")
+                or info.get("original_url")
+                or query
+            )
+            result = {
+                "title": info.get("title") or "Unknown title",
+                "url": video_page_url,
+                "duration": duration,
+                "thumbnail": info.get("thumbnail"),
+                "file_path": video_url,
+                "audio_path": audio_url,
+            }
+            _cache_set(key, result)
+            return result
         except (TrackNotFound, TrackTooLong):
             raise
         except Exception as exc:

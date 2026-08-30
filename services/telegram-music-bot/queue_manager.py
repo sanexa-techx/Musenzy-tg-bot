@@ -13,6 +13,8 @@ class Track:
     thumbnail: str | None
     requested_by: str
     file_path: str
+    is_video: bool = False
+    audio_path: str | None = None
 
 
 @dataclass
