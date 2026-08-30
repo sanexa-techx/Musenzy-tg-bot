@@ -14,6 +14,7 @@ Render deployment notes
 import asyncio
 import base64
 import contextlib
+import lzma
 import logging
 import os
 
@@ -48,15 +49,20 @@ def _bootstrap_cookies() -> None:
     if not configured.strip():
         return
     try:
-        # Accept a protected raw Netscape export as well as base64. This makes
-        # the secret setup resilient to copy/paste mistakes without weakening
-        # validation for other input.
-        if configured.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
+        normalized = configured.strip()
+        if normalized.startswith("XZ1:"):
+            compressed = "".join(normalized[4:].split())
+            compressed += "=" * (-len(compressed) % 4)
+            decoded = lzma.decompress(base64.b64decode(compressed, validate=True)).decode("utf-8")
+        elif normalized.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
             decoded = configured
         else:
+            # Accept a protected raw Netscape export as well as base64. This makes
+            # the secret setup resilient to copy/paste mistakes without weakening
+            # validation for other input.
             # Secret values may be copied without trailing "=" padding or with
             # line-wrapping, so normalize both before decoding.
-            b64 = "".join(configured.split()).strip("\"'`")
+            b64 = "".join(normalized.split()).strip("\"'`")
             if "base64," in b64:
                 b64 = b64.split("base64,", 1)[1]
             # Also accept URL-safe base64 produced by some web tools.
