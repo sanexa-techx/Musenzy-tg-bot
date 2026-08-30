@@ -425,6 +425,8 @@ def _to_jpeg(content: bytes) -> bytes | None:
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-err_detect",
+                "explode",
                 "-i",
                 "pipe:0",
                 "-frames:v",
@@ -485,7 +487,9 @@ async def download_thumbnail(
     if not cache_key:
         return None
 
-    cache_path = os.path.join(DOWNLOAD_DIR, f"thumbnail-{cache_key}.jpg")
+    # Bump the cache namespace so malformed files written by older versions
+    # cannot be reused after the validation/format fixes.
+    cache_path = os.path.join(DOWNLOAD_DIR, f"thumbnail-v2-{cache_key}.jpg")
     try:
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1024:
             with open(cache_path, "rb") as cached_file:
@@ -524,6 +528,13 @@ async def download_thumbnail(
                             continue
                         content = await response.content.read(8 * 1024 * 1024)
                         content_type = response.headers.get("Content-Type", "").lower()
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            try:
+                                if int(content_length) != len(content):
+                                    continue
+                            except ValueError:
+                                pass
                         if not content or (
                             not content_type.startswith("image/")
                             and not content.startswith(
