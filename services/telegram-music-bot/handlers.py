@@ -12,7 +12,7 @@ from pyrogram.errors import ChannelInvalid, ChannelPrivate, FloodWait, UserAlrea
 from pyrogram.types import CallbackQuery, Message
 
 from autoplay import AutoplayManager
-from bot_api import BotApiClient, BotApiError
+from bot_api import BotApiClient, BotApiError, BotApiMessage
 from broadcast import BroadcastManager
 from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
 from keyboards import (
@@ -304,14 +304,10 @@ def register_handlers(
                 except BotApiError:
                     log.warning(
                         "Could not send thumbnail through Bot API for chat %s; "
-                        "falling back to styled text",
+                        "falling back to native photo delivery",
                         chat_id,
                     )
-                    message = await bot_api.send_message(
-                        chat_id,
-                        caption,
-                        reply_markup=initial_markup,
-                    )
+                    raise
             else:
                 message = await bot_api.send_message(
                     chat_id,
@@ -366,9 +362,20 @@ def register_handlers(
             except Exception:
                 log.exception("Failed to post now-playing message for chat %s", chat_id)
                 return
+
+        if isinstance(message, BotApiMessage):
+            progress_markup = lambda e, d, p, cid=chat_id: _controls(cid, e, d)
+        else:
+            progress_markup = lambda e, d, p, cid=chat_id: player_controls(
+                paused=p,
+                elapsed=e,
+                duration=d,
+                track_url=_track_urls.get(cid, ""),
+                autoplay_enabled=autoplayer.is_enabled(cid),
+            )
         tracker.start(
             chat_id, message, track.duration, caption,
-            lambda e, d, p, cid=chat_id: _controls(cid, e, d),
+            progress_markup,
         )
 
     async def _post_queue_empty(chat_id: int) -> None:
