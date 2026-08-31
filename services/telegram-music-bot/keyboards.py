@@ -64,6 +64,9 @@ def player_button_editor_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("✏️ Auto OFF", callback_data="pbtn:edit:autoplay_off"),
             ],
             [
+                InlineKeyboardButton("✏️ Fav", callback_data="pbtn:edit:fav"),
+            ],
+            [
                 InlineKeyboardButton("🎨 Style help", callback_data="pbtn:stylehelp"),
                 InlineKeyboardButton("👁 Preview", callback_data="pbtn:preview"),
             ],
@@ -140,6 +143,10 @@ def player_controls(
                     settings.label("autoplay_on" if autoplay_enabled else "autoplay_off"),
                     callback_data="ctl:autoplay",
                 ),
+                InlineKeyboardButton(
+                    settings.label("fav"),
+                    callback_data="ctl:fav",
+                ),
             ],
         ]
     )
@@ -211,6 +218,11 @@ def player_controls_api(
                     settings.label("autoplay_on" if autoplay_enabled else "autoplay_off"),
                     style=settings.style("autoplay_on" if autoplay_enabled else "autoplay_off"),
                     callback_data="ctl:autoplay",
+                ),
+                button(
+                    settings.label("fav"),
+                    style=settings.style("fav"),
+                    callback_data="ctl:fav",
                 ),
             ],
         ]

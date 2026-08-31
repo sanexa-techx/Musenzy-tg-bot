@@ -26,9 +26,9 @@ from pytgcalls import PyTgCalls
 from autoplay import AutoplayManager
 from broadcast import BroadcastManager
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN, OWNER_ID
+from favorites import FavoritesStore
 from handlers import register_handlers
 from player import VoiceChatPlayer
-from playlist_manager import PlaylistManager
 from queue_manager import QueueManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -146,9 +146,10 @@ async def run() -> None:
     player     = VoiceChatPlayer(calls, queues)
     broadcaster = BroadcastManager()
     autoplayer = AutoplayManager()
-    playlist_mgr = PlaylistManager()
+    favorites  = FavoritesStore()
+    await favorites.connect()
 
-    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer, playlist_mgr)
+    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer, favorites)
 
     # Start health server first so Render marks the service healthy ASAP.
     health_runner = await _start_health_server()
@@ -167,10 +168,7 @@ async def run() -> None:
         BotCommand("resume",         "Resume playback"),
         BotCommand("stop",           "Stop and leave the voice chat"),
         BotCommand("queue",          "Show the current queue"),
-        BotCommand("playlist",       "📋 Play a YouTube playlist or saved playlist"),
-        BotCommand("saveplaylist",   "💾 Save a playlist under a name"),
-        BotCommand("myplaylists",    "📂 List your saved playlists"),
-        BotCommand("deleteplaylist", "🗑 Delete a saved playlist"),
+        BotCommand("favplay",        "❤️ Play a saved favorite"),
         BotCommand("autoplay",       "🔄 Toggle related-song autoplay"),
         BotCommand("stopautoplay",   "⏹ Stop autoplay"),
     ]
@@ -199,6 +197,7 @@ async def run() -> None:
         await asyncio.Event().wait()
     finally:
         await health_runner.cleanup()
+        await favorites.close()
 
 
 if __name__ == "__main__":

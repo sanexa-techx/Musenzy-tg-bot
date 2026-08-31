@@ -20,6 +20,7 @@ DEFAULT_LABELS: dict[str, str] = {
     "close": "✖️",
     "autoplay_on": "✔️ 𝙰𝚄𝚃𝙾",
     "autoplay_off": "𝙰𝚄𝚃𝙾",
+    "fav": "❤️ 𝙵𝙰𝚅",
 }
 
 DEFAULT_STYLES: dict[str, str] = {
@@ -31,6 +32,7 @@ DEFAULT_STYLES: dict[str, str] = {
     "close": "danger",
     "autoplay_on": "success",
     "autoplay_off": "danger",
+    "fav": "danger",
 }
 
 DEFAULT_CARD_TEXT: dict[str, str] = {
@@ -52,6 +54,7 @@ BUTTON_NAMES: dict[str, str] = {
     "close": "Close",
     "autoplay_on": "Autoplay enabled",
     "autoplay_off": "Autoplay disabled",
+    "fav": "Favorites",
 }
 
 CARD_TEXT_NAMES: dict[str, str] = {
@@ -80,6 +83,9 @@ BUTTON_ALIASES: dict[str, str] = {
     "auto_on": "autoplay_on",
     "autoplay_off": "autoplay_off",
     "auto_off": "autoplay_off",
+    "fav": "fav",
+    "favorite": "fav",
+    "favorites": "fav",
 }
 
 CARD_TEXT_ALIASES: dict[str, str] = {
