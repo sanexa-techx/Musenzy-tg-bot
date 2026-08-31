@@ -58,7 +58,8 @@ COMMANDS_TEXT = (
     "/resume -- resume playback\n"
     "/stop -- stop and leave the voice chat\n"
     "/queue -- show the current queue\n"
-    "/favplay [number] -- play one of your favorite songs\n"
+    "/favplay -- queue all favorite songs in order\n"
+    "/favplay <number> -- play one favorite song\n"
     "/autoplay -- toggle related-song autoplay\n"
     "/stopautoplay -- turn autoplay off"
 )
@@ -810,16 +811,22 @@ def register_handlers(
                 f"   <code>/favplay {position}</code>"
             )
         lines.append(
-            "\nUse <code>/favplay &lt;number&gt;</code> to play one. "
+            "\nUse <code>/favplay</code> to queue all favorites in order, or "
+            "<code>/favplay &lt;number&gt;</code> to play one. "
             "Tap ❤️ Fav on a player card to save or remove the current song."
         )
         return "\n".join(lines)
 
     @bot.on_message(filters.command("favplay") & filters.group)
     async def favplay_cmd(client: Client, message: Message) -> None:
-        """Play one of the requesting user's database favorites."""
+        """Play all favorites in order, or one favorite when requested."""
         user_id = message.from_user.id if message.from_user else 0
-        saved = await favorites.list_for_user(user_id)
+        try:
+            saved = await favorites.list_for_user(user_id)
+        except Exception:
+            log.exception("Failed to load favorites for user %s", user_id)
+            await message.reply_text("❌ Could not load your favorites right now.")
+            return
         if not saved:
             await message.reply_text(
                 "❤️ You have no favorite songs yet.\n"
@@ -829,30 +836,29 @@ def register_handlers(
 
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
-            await message.reply_text(
-                _favorite_list_text(saved),
-                parse_mode=enums.ParseMode.HTML,
-            )
-            return
-
-        choice = parts[1].strip()
-        favorite: FavoriteTrack | None = None
-        if choice.isdigit():
-            position = int(choice)
-            if 1 <= position <= len(saved):
-                favorite = saved[position - 1]
+            favorites_to_play = saved
+            single_favorite = False
         else:
-            favorite = next(
-                (item for item in saved if choice.casefold() in item.title.casefold()),
-                None,
-            )
+            choice = parts[1].strip()
+            favorite: FavoriteTrack | None = None
+            if choice.isdigit():
+                position = int(choice)
+                if 1 <= position <= len(saved):
+                    favorite = saved[position - 1]
+            else:
+                favorite = next(
+                    (item for item in saved if choice.casefold() in item.title.casefold()),
+                    None,
+                )
 
-        if favorite is None:
-            await message.reply_text(
-                "❌ Favorite not found.\n\n" + _favorite_list_text(saved),
-                parse_mode=enums.ParseMode.HTML,
-            )
-            return
+            if favorite is None:
+                await message.reply_text(
+                    "❌ Favorite not found.\n\n" + _favorite_list_text(saved),
+                    parse_mode=enums.ParseMode.HTML,
+                )
+                return
+            favorites_to_play = [favorite]
+            single_favorite = True
 
         chat_id = message.chat.id
         broadcaster.register_chat(chat_id)
@@ -874,52 +880,73 @@ def register_handlers(
                 await message.delete()
             searching_msg = None
             with contextlib.suppress(Exception):
-                searching_msg = await bot.send_message(chat_id, "❤️")
-            try:
-                info = await resolve_and_download(favorite.url)
-            except TrackTooLong as exc:
-                asyncio.create_task(_send_and_delete(chat_id, bot, str(exc)))
-                return
-            except TrackNotFound:
-                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that favorite track."))
-                return
-            except YouTubeBlocked:
-                asyncio.create_task(
-                    _send_and_delete(
-                        chat_id,
-                        bot,
-                        "❌ YouTube blocked this server. Please refresh the YouTube cookies in "
-                        "YOUTUBE_COOKIES_B64, then restart the bot.",
-                    )
+                searching_msg = await bot.send_message(
+                    chat_id,
+                    "❤️ Loading your favorite songs one by one…",
                 )
-                return
-            except Exception:
-                log.exception("Failed to resolve favorite for chat %s", chat_id)
-                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Could not play that favorite right now."))
-                return
-            finally:
-                with contextlib.suppress(Exception):
-                    if searching_msg:
-                        await searching_msg.delete()
 
+            queued_count = 0
+            skipped: list[str] = []
             user = message.from_user
             requester = (
                 f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
                 if user
                 else "someone"
             )
-            track = Track(
-                title=info["title"],
-                url=info["url"],
-                stream_url=info["url"],
-                duration=info["duration"],
-                thumbnail=info["thumbnail"],
-                requested_by=requester,
-                file_path=info["file_path"],
-            )
-            position = await player.play_or_enqueue(chat_id, track)
-            if position > 0:
-                await _send_queued_card(chat_id, track, _format_track(track, position))
+            try:
+                for favorite in favorites_to_play:
+                    try:
+                        info = await resolve_and_download(favorite.url)
+                    except (TrackTooLong, TrackNotFound, YouTubeBlocked):
+                        skipped.append(favorite.title)
+                        continue
+                    except Exception:
+                        log.exception(
+                            "Failed to resolve favorite %s for chat %s",
+                            favorite.title,
+                            chat_id,
+                        )
+                        skipped.append(favorite.title)
+                        continue
+
+                    track = Track(
+                        title=info["title"],
+                        url=info["url"],
+                        stream_url=info["url"],
+                        duration=info["duration"],
+                        thumbnail=info["thumbnail"],
+                        requested_by=requester,
+                        file_path=info["file_path"],
+                    )
+                    position = await player.play_or_enqueue(chat_id, track)
+                    queued_count += 1
+                    if position > 0:
+                        await _send_queued_card(
+                            chat_id,
+                            track,
+                            _format_track(track, position),
+                        )
+            finally:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
+
+            if queued_count:
+                if single_favorite:
+                    summary = "❤️ Favorite added to the queue."
+                else:
+                    summary = (
+                        f"❤️ Queued {queued_count} favorite song"
+                        f"{'s' if queued_count != 1 else ''} in order."
+                    )
+                if skipped:
+                    summary += f"\n⚠️ Skipped {len(skipped)} unavailable favorite(s)."
+                await bot.send_message(chat_id, summary)
+            elif skipped:
+                await bot.send_message(
+                    chat_id,
+                    "❌ None of your favorites could be played right now.",
+                )
 
     @bot.on_message(filters.command("autoplay") & filters.group)
     async def autoplay_cmd(_client: Client, message: Message) -> None:
