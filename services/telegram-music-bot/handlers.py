@@ -15,6 +15,7 @@ from autoplay import AutoplayManager
 from bot_api import BotApiClient, BotApiMessage
 from broadcast import BroadcastManager
 from config import BOT_TOKEN, LOGO_PATH, OWNER_ID
+from favorites import FavoriteTrack, FavoritesStore
 from keyboards import (
     broadcast_schedule_menu,
     player_card_editor_menu,
@@ -29,12 +30,11 @@ from player_button_config import (
     CARD_TEXT_NAMES,
     get_player_button_settings,
 )
-from playlist_manager import PlaylistManager
 from progress import NowPlayingTracker
 from queue_manager import QueueManager, Track
 from youtube import (
     TrackNotFound, TrackTooLong, YouTubeBlocked,
-    download_thumbnail, fetch_playlist_entries, get_related_track,
+    download_thumbnail, get_related_track,
     resolve_and_download, resolve_stream_url, resolve_video_stream_url,
     _extract_video_id,
 )
@@ -55,6 +55,7 @@ COMMANDS_TEXT = (
     "/resume -- resume playback\n"
     "/stop -- stop and leave the voice chat\n"
     "/queue -- show the current queue\n"
+    "/favplay [number] -- play one of your favorite songs\n"
     "/autoplay -- toggle related-song autoplay\n"
     "/stopautoplay -- turn autoplay off"
 )
@@ -171,16 +172,13 @@ def register_handlers(
     queues: QueueManager,
     broadcaster: BroadcastManager,
     autoplayer: AutoplayManager,
-    playlists: PlaylistManager,
+    favorites: FavoritesStore,
 ) -> None:
     tracker = NowPlayingTracker()
     bot_api = BotApiClient(BOT_TOKEN or "")
 
     # Per-chat locks: prevent two concurrent /play downloads in the same chat.
     _chat_locks: dict[int, asyncio.Lock] = {}
-
-    # Background playlist-loading tasks per chat (cancelled on /stop).
-    _playlist_tasks: dict[int, asyncio.Task] = {}
 
     # Autoplay repeat protection: no YouTube video may be selected twice during
     # one active autoplay session. This is intentionally a set, not a rolling
@@ -699,10 +697,6 @@ def register_handlers(
             with contextlib.suppress(Exception):
                 await message.delete()
             return
-        # Cancel any background playlist loading for this chat.
-        task = _playlist_tasks.pop(message.chat.id, None)
-        if task:
-            task.cancel()
         tracker.stop(message.chat.id)
         await player.stop(message.chat.id)
         _clear_autoplay_memory(message.chat.id)
@@ -722,44 +716,66 @@ def register_handlers(
         await message.reply_text("\n".join(lines))
 
     # ──────────────────────────────────────────────
-    # Playlist commands
+    # Favorites commands
     # ──────────────────────────────────────────────
 
-    @bot.on_message(filters.command("playlist") & filters.group)
-    async def playlist_cmd(client: Client, message: Message) -> None:
-        """Play a YouTube playlist URL or a user's saved playlist by name."""
-        parts = message.text.split(maxsplit=1)
-        chat_id = message.chat.id
-        broadcaster.register_chat(chat_id)
+    def _favorite_list_text(saved: list[FavoriteTrack]) -> str:
+        lines = [
+            "❤️ <b>Your favorite songs</b>",
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        for position, favorite in enumerate(saved, start=1):
+            lines.append(
+                f"{position}. <b>{html.escape(favorite.title)}</b>\n"
+                f"   <code>/favplay {position}</code>"
+            )
+        lines.append(
+            "\nUse <code>/favplay &lt;number&gt;</code> to play one. "
+            "Tap ❤️ Fav on a player card to save or remove the current song."
+        )
+        return "\n".join(lines)
 
+    @bot.on_message(filters.command("favplay") & filters.group)
+    async def favplay_cmd(client: Client, message: Message) -> None:
+        """Play one of the requesting user's database favorites."""
+        user_id = message.from_user.id if message.from_user else 0
+        saved = await favorites.list_for_user(user_id)
+        if not saved:
+            await message.reply_text(
+                "❤️ You have no favorite songs yet.\n"
+                "Tap the ❤️ Fav button on a playing song to save it."
+            )
+            return
+
+        parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.reply_text(
-                "📋 <b>Playlist usage</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "/playlist &lt;youtube_playlist_url&gt;\n"
-                "/playlist &lt;saved_name&gt;\n\n"
-                "Save a playlist first with:\n"
-                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>",
+                _favorite_list_text(saved),
                 parse_mode=enums.ParseMode.HTML,
             )
             return
 
-        arg = parts[1].strip()
-        user_id = message.from_user.id if message.from_user else 0
+        choice = parts[1].strip()
+        favorite: FavoriteTrack | None = None
+        if choice.isdigit():
+            position = int(choice)
+            if 1 <= position <= len(saved):
+                favorite = saved[position - 1]
+        else:
+            favorite = next(
+                (item for item in saved if choice.casefold() in item.title.casefold()),
+                None,
+            )
 
-        # Resolve saved name → URL if arg is not a URL.
-        url = arg
-        if not arg.startswith("http"):
-            saved_url = playlists.get(user_id, arg)
-            if not saved_url:
-                await message.reply_text(
-                    f"❌ No saved playlist named <code>{html.escape(arg)}</code>.\n"
-                    "Use /myplaylists to see your saved playlists.",
-                    parse_mode=enums.ParseMode.HTML,
-                )
-                return
-            url = saved_url
+        if favorite is None:
+            await message.reply_text(
+                "❌ Favorite not found.\n\n" + _favorite_list_text(saved),
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
 
+        chat_id = message.chat.id
+        broadcaster.register_chat(chat_id)
         join_error = await _ensure_assistant_in_chat(client, assistant, chat_id)
         if join_error:
             asyncio.create_task(_send_and_delete(chat_id, bot, join_error))
@@ -767,174 +783,67 @@ def register_handlers(
                 await message.delete()
             return
 
-        with contextlib.suppress(Exception):
-            await message.delete()
-
-        status_msg = await bot.send_message(chat_id, "📋 Fetching playlist info…")
-
-        try:
-            entries = await fetch_playlist_entries(url, max_tracks=50)
-        except Exception:
+        lock = _chat_locks.setdefault(chat_id, asyncio.Lock())
+        if lock.locked():
             with contextlib.suppress(Exception):
-                await status_msg.edit_text(
-                    "❌ Couldn't fetch that playlist. Make sure it's a valid, public YouTube playlist URL."
-                )
+                await message.delete()
             return
 
-        if not entries:
+        async with lock:
             with contextlib.suppress(Exception):
-                await status_msg.edit_text("❌ Playlist is empty or not accessible.")
-            return
-
-        user = message.from_user
-        if user:
-            requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
-        else:
-            requester = "someone"
-
-        total = len(entries)
-        with contextlib.suppress(Exception):
-            await status_msg.edit_text(
-                f"📋 Found <b>{total}</b> track(s) — downloading first song…",
-                parse_mode=enums.ParseMode.HTML,
-            )
-
-        # Download and start the first track immediately.
-        try:
-            first_info = await resolve_and_download(entries[0]["url"])
-        except Exception:
+                await message.delete()
+            searching_msg = None
             with contextlib.suppress(Exception):
-                await status_msg.edit_text("❌ Couldn't load the first track in the playlist.")
-            return
-
-        first_track = Track(
-            title=first_info["title"],
-            url=first_info["url"],
-            stream_url=first_info["url"],
-            duration=first_info["duration"],
-            thumbnail=first_info["thumbnail"],
-            requested_by=requester,
-            file_path=first_info["file_path"],
-        )
-        await player.play_or_enqueue(chat_id, first_track)
-        with contextlib.suppress(Exception):
-            await status_msg.delete()
-
-        if total > 1:
-            # Cancel any prior background loader for this chat.
-            old_task = _playlist_tasks.pop(chat_id, None)
-            if old_task:
-                old_task.cancel()
-
-            async def _load_rest(
-                _entries=entries[1:], _chat_id=chat_id, _req=requester
-            ) -> None:
-                for entry in _entries:
-                    # Stop loading if the voice chat ended (user used /stop).
-                    if queues.state(_chat_id).current is None:
-                        break
-                    try:
-                        info = await resolve_and_download(entry["url"])
-                    except Exception:
-                        continue  # skip unplayable tracks silently
-                    track = Track(
-                        title=info["title"],
-                        url=info["url"],
-                        stream_url=info["url"],
-                        duration=info["duration"],
-                        thumbnail=info["thumbnail"],
-                        requested_by=_req,
-                        file_path=info["file_path"],
+                searching_msg = await bot.send_message(chat_id, "❤️")
+            try:
+                info = await resolve_and_download(favorite.url)
+            except TrackTooLong as exc:
+                asyncio.create_task(_send_and_delete(chat_id, bot, str(exc)))
+                return
+            except TrackNotFound:
+                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Couldn't find that favorite track."))
+                return
+            except YouTubeBlocked:
+                asyncio.create_task(
+                    _send_and_delete(
+                        chat_id,
+                        bot,
+                        "❌ YouTube blocked this server. Please refresh the YouTube cookies in "
+                        "YOUTUBE_COOKIES_B64, then restart the bot.",
                     )
-                    await player.play_or_enqueue(_chat_id, track)
-                _playlist_tasks.pop(_chat_id, None)
+                )
+                return
+            except Exception:
+                log.exception("Failed to resolve favorite for chat %s", chat_id)
+                asyncio.create_task(_send_and_delete(chat_id, bot, "❌ Could not play that favorite right now."))
+                return
+            finally:
+                with contextlib.suppress(Exception):
+                    if searching_msg:
+                        await searching_msg.delete()
 
-            _playlist_tasks[chat_id] = asyncio.create_task(_load_rest())
-            await bot.send_message(
-                chat_id,
-                f"📋 <b>Playlist loading</b> — queuing <b>{total - 1}</b> more track(s) in the background…",
-                parse_mode=enums.ParseMode.HTML,
+            user = message.from_user
+            requester = (
+                f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+                if user
+                else "someone"
             )
-
-    @bot.on_message(filters.command("saveplaylist"))
-    async def saveplaylist_cmd(_client: Client, message: Message) -> None:
-        """Save a YouTube playlist URL under a short name. Works in DM or group."""
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3 or not parts[2].startswith("http"):
-            await message.reply_text(
-                "📋 <b>Save a playlist</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "Usage: <code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>\n\n"
-                "Example:\n"
-                "<code>/saveplaylist lofi https://youtube.com/playlist?list=...</code>",
-                parse_mode=enums.ParseMode.HTML,
+            track = Track(
+                title=info["title"],
+                url=info["url"],
+                stream_url=info["url"],
+                duration=info["duration"],
+                thumbnail=info["thumbnail"],
+                requested_by=requester,
+                file_path=info["file_path"],
             )
-            return
-
-        name = parts[1].strip()
-        url = parts[2].strip()
-        user_id = message.from_user.id if message.from_user else 0
-
-        if len(name) > 32:
-            await message.reply_text("❌ Playlist name must be 32 characters or fewer.")
-            return
-
-        playlists.save(user_id, name, url)
-        await message.reply_text(
-            f"✅ Saved playlist <b>{html.escape(name)}</b>!\n"
-            f"Use <code>/playlist {html.escape(name)}</code> in any group to play it.",
-            parse_mode=enums.ParseMode.HTML,
-        )
-
-    @bot.on_message(filters.command("myplaylists"))
-    async def myplaylists_cmd(_client: Client, message: Message) -> None:
-        """List all saved playlists for the user."""
-        user_id = message.from_user.id if message.from_user else 0
-        saved = playlists.list_playlists(user_id)
-
-        if not saved:
-            await message.reply_text(
-                "📋 You have no saved playlists yet.\n\n"
-                "Save one with:\n"
-                "<code>/saveplaylist &lt;name&gt; &lt;youtube_playlist_url&gt;</code>",
-                parse_mode=enums.ParseMode.HTML,
-            )
-            return
-
-        lines = ["📋 <b>Your saved playlists</b>\n━━━━━━━━━━━━━━━━━━"]
-        for i, (name, url) in enumerate(saved.items(), 1):
-            lines.append(f"{i}. <b>{html.escape(name)}</b> — <a href=\"{url}\">link</a>")
-        lines.append(
-            "\nUse <code>/playlist &lt;name&gt;</code> in a group to play one.\n"
-            "Delete with <code>/deleteplaylist &lt;name&gt;</code>."
-        )
-        await message.reply_text("\n".join(lines), parse_mode=enums.ParseMode.HTML,
-                                 disable_web_page_preview=True)
-
-    @bot.on_message(filters.command("deleteplaylist"))
-    async def deleteplaylist_cmd(_client: Client, message: Message) -> None:
-        """Delete a saved playlist by name."""
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            await message.reply_text(
-                "Usage: <code>/deleteplaylist &lt;name&gt;</code>",
-                parse_mode=enums.ParseMode.HTML,
-            )
-            return
-
-        name = parts[1].strip()
-        user_id = message.from_user.id if message.from_user else 0
-
-        if playlists.delete(user_id, name):
-            await message.reply_text(
-                f"🗑 Playlist <b>{html.escape(name)}</b> deleted.",
-                parse_mode=enums.ParseMode.HTML,
-            )
-        else:
-            await message.reply_text(
-                f"❌ No saved playlist named <code>{html.escape(name)}</code>.",
-                parse_mode=enums.ParseMode.HTML,
-            )
+            position = await player.play_or_enqueue(chat_id, track)
+            if position > 0:
+                await bot.send_message(
+                    chat_id,
+                    _format_track(track, position),
+                    parse_mode=enums.ParseMode.HTML,
+                )
 
     @bot.on_message(filters.command("autoplay") & filters.group)
     async def autoplay_cmd(_client: Client, message: Message) -> None:
@@ -1007,8 +916,9 @@ def register_handlers(
         action = query.data.split(":", 1)[1]
         chat_id = query.message.chat.id
 
-        # queue and close are read-only — anyone can use them.
-        if action not in ("queue", "close"):
+        # queue, close, and favorites are user actions — playback controls
+        # remain restricted to group admins.
+        if action not in ("queue", "close", "fav"):
             if not await _is_admin(client, chat_id, query.from_user.id):
                 with contextlib.suppress(Exception):
                     await query.answer("🚫 Only admins can control playback.", show_alert=True)
@@ -1066,22 +976,32 @@ def register_handlers(
                 await query.answer("Autoplay enabled" if enabled else "Autoplay disabled")
             with contextlib.suppress(Exception):
                 await _refresh_controls(chat_id)
-        elif action == "addplaylist":
+        elif action == "fav":
+            if not state.current:
+                with contextlib.suppress(Exception):
+                    await query.answer("Nothing is playing", show_alert=True)
+                return
+
+            track = state.current
+            video_id = _extract_video_id(track.url) or track.url.strip()
+            thumbnail = track.thumbnail if track.thumbnail and track.thumbnail.startswith("http") else None
+            try:
+                saved = await favorites.toggle(
+                    query.from_user.id,
+                    video_id=video_id,
+                    url=track.url,
+                    title=track.title,
+                    duration=track.duration,
+                    thumbnail=thumbnail,
+                )
+            except Exception:
+                log.exception("Failed to toggle favorite for user %s", query.from_user.id)
+                with contextlib.suppress(Exception):
+                    await query.answer("Favorites database is unavailable.", show_alert=True)
+                return
+
             with contextlib.suppress(Exception):
-                await query.answer()
-            await query.message.reply_text(
-                "🔵 <b>Add Playlist+</b>\n"
-                "━━━━━━━━━━━━━━━━━━\n"
-                "Load any YouTube playlist into the queue:\n"
-                "<code>/playlist &lt;youtube_playlist_url&gt;</code>\n\n"
-                "Play a saved playlist by name:\n"
-                "<code>/playlist &lt;name&gt;</code>\n\n"
-                "Save a playlist for quick access:\n"
-                "<code>/saveplaylist &lt;name&gt; &lt;url&gt;</code>\n\n"
-                "View your saved playlists:\n"
-                "<code>/myplaylists</code>",
-                parse_mode=enums.ParseMode.HTML,
-            )
+                await query.answer("❤️ Added to favorites" if saved else "💔 Removed from favorites")
         elif action == "close":
             with contextlib.suppress(Exception):
                 await query.answer()
@@ -1131,7 +1051,7 @@ def register_handlers(
                 "",
                 "Names: <code>pause</code>, <code>resume</code>, <code>skip</code>, "
                 "<code>stop</code>, <code>queue</code>, <code>close</code>, "
-                "<code>autoplay_on</code>, <code>autoplay_off</code>",
+                "<code>autoplay_on</code>, <code>autoplay_off</code>, <code>fav</code>",
                 "",
                 "<b>Card text above the buttons:</b>",
                 "Tap <code>📝 Edit card text</code> to customize the heading, "

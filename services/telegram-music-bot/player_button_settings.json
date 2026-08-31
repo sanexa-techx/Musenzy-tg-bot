@@ -1,0 +1,33 @@
+{
+  "labels": {
+    "pause": "❚❚",
+    "resume": "▷",
+    "skip": "⪼",
+    "stop": "▣",
+    "queue": "⇆",
+    "close": "✘",
+    "autoplay_on": "𝙰𝚄𝚃𝙾 ✓",
+    "autoplay_off": "𝙰𝚄𝚃𝙾 ✗",
+    "fav": "𝙵𝙰𝚅 ♡"
+  },
+  "styles": {
+    "pause": "success",
+    "resume": "success",
+    "skip": "primary",
+    "stop": "danger",
+    "queue": "primary",
+    "close": "danger",
+    "autoplay_on": "success",
+    "autoplay_off": "danger",
+    "fav": "danger"
+  },
+  "card_text": {
+    "now_playing": "➥ ɴᴏᴡ ᴘʟᴀʏɪɴɢ⭍⧽⧽⧽",
+    "queued": "✨ ᴀᴅᴅᴇᴅ ᴛᴏ ǫᴜᴇᴜᴇ",
+    "divider": "━━━━━━━━━━━━━━━━━━",
+    "song_prefix": "➦",
+    "time_prefix": "⏱",
+    "requester_prefix": "👤",
+    "separator": "᳇"
+  }
+}
