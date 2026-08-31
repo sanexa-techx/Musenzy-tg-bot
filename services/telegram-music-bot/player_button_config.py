@@ -21,6 +21,7 @@ DEFAULT_LABELS: dict[str, str] = {
     "autoplay_on": "✔️ 𝙰𝚄𝚃𝙾",
     "autoplay_off": "𝙰𝚄𝚃𝙾",
     "fav": "❤️ 𝙵𝙰𝚅",
+    "play_now": "▶️ Play Now",
 }
 
 DEFAULT_STYLES: dict[str, str] = {
@@ -33,6 +34,7 @@ DEFAULT_STYLES: dict[str, str] = {
     "autoplay_on": "success",
     "autoplay_off": "danger",
     "fav": "danger",
+    "play_now": "primary",
 }
 
 DEFAULT_CARD_TEXT: dict[str, str] = {
@@ -45,6 +47,11 @@ DEFAULT_CARD_TEXT: dict[str, str] = {
     "separator": "·",
 }
 
+DEFAULT_CARD_LAYOUTS: dict[str, list[str]] = {
+    "playing": ["heading", "divider", "spacer", "song", "spacer", "meta"],
+    "queue": ["heading", "divider", "spacer", "song", "spacer", "meta"],
+}
+
 BUTTON_NAMES: dict[str, str] = {
     "pause": "Pause",
     "resume": "Resume",
@@ -55,6 +62,7 @@ BUTTON_NAMES: dict[str, str] = {
     "autoplay_on": "Autoplay enabled",
     "autoplay_off": "Autoplay disabled",
     "fav": "Favorites",
+    "play_now": "Play now",
 }
 
 CARD_TEXT_NAMES: dict[str, str] = {
@@ -86,6 +94,8 @@ BUTTON_ALIASES: dict[str, str] = {
     "fav": "fav",
     "favorite": "fav",
     "favorites": "fav",
+    "play_now": "play_now",
+    "playnow": "play_now",
 }
 
 CARD_TEXT_ALIASES: dict[str, str] = {
@@ -107,6 +117,34 @@ CARD_TEXT_ALIASES: dict[str, str] = {
     "requester_prefix": "requester_prefix",
     "separator": "separator",
     "sep": "separator",
+}
+
+LAYOUT_ALIASES: dict[str, str] = {
+    "playing": "playing",
+    "play": "playing",
+    "now": "playing",
+    "now_playing": "playing",
+    "queue": "queue",
+    "queued": "queue",
+}
+
+LAYOUT_ITEM_ALIASES: dict[str, str] = {
+    "heading": "heading",
+    "title": "heading",
+    "divider": "divider",
+    "line": "divider",
+    "song": "song",
+    "name": "song",
+    "time": "time",
+    "duration": "time",
+    "requester": "requester",
+    "requested_by": "requester",
+    "user": "requester",
+    "meta": "meta",
+    "details": "meta",
+    "info": "meta",
+    "spacer": "spacer",
+    "blank": "spacer",
 }
 
 VALID_STYLES = frozenset({"primary", "success", "danger"})
@@ -137,9 +175,13 @@ class PlayerButtonSettings:
         saved_labels = raw.get("labels", {})
         saved_styles = raw.get("styles", {})
         saved_card_text = raw.get("card_text", {})
+        saved_layouts = raw.get("layouts", {})
         self.labels = dict(DEFAULT_LABELS)
         self.styles = dict(DEFAULT_STYLES)
         self.card_text = dict(DEFAULT_CARD_TEXT)
+        self.layouts = {
+            key: list(value) for key, value in DEFAULT_CARD_LAYOUTS.items()
+        }
 
         if isinstance(saved_labels, dict):
             for key, value in saved_labels.items():
@@ -155,6 +197,12 @@ class PlayerButtonSettings:
                 if key in self.card_text and isinstance(value, str):
                     with contextlib.suppress(ValueError):
                         self.card_text[key] = self.validate_label(value)
+        if isinstance(saved_layouts, dict):
+            for key, value in saved_layouts.items():
+                if key not in self.layouts or not isinstance(value, list):
+                    continue
+                with contextlib.suppress(ValueError):
+                    self.layouts[key] = self.validate_layout(",".join(value))
 
     @staticmethod
     def validate_label(label: str) -> str:
@@ -171,6 +219,35 @@ class PlayerButtonSettings:
     def resolve_key(name: str) -> str | None:
         return BUTTON_ALIASES.get(name.strip().lower())
 
+    @staticmethod
+    def resolve_layout_key(name: str) -> str | None:
+        return LAYOUT_ALIASES.get(name.strip().lower())
+
+    @staticmethod
+    def validate_layout(value: str) -> list[str]:
+        items = [
+            item.strip().lower()
+            for item in value.replace(">", ",").split(",")
+            if item.strip()
+        ]
+        if not items:
+            raise ValueError("The layout cannot be empty.")
+        if len(items) > 8:
+            raise ValueError("A layout can contain at most 8 items.")
+
+        normalized: list[str] = []
+        for item in items:
+            key = LAYOUT_ITEM_ALIASES.get(item)
+            if key is None:
+                raise ValueError(
+                    "Unknown layout item. Use heading, divider, song, time, "
+                    "requester, meta, or spacer."
+                )
+            if key != "spacer" and key in normalized:
+                raise ValueError(f"The layout contains {key} more than once.")
+            normalized.append(key)
+        return normalized
+
     def label(self, key: str) -> str:
         return self.labels[key]
 
@@ -179,6 +256,9 @@ class PlayerButtonSettings:
 
     def card(self, key: str) -> str:
         return self.card_text[key]
+
+    def layout(self, key: str) -> list[str]:
+        return list(self.layouts[key])
 
     def set_label(self, name: str, label: str) -> str:
         key = self.resolve_key(name)
@@ -190,6 +270,7 @@ class PlayerButtonSettings:
                 "labels": self.labels,
                 "styles": self.styles,
                 "card_text": self.card_text,
+                "layouts": self.layouts,
             }
         )
         return key
@@ -207,6 +288,7 @@ class PlayerButtonSettings:
                 "labels": self.labels,
                 "styles": self.styles,
                 "card_text": self.card_text,
+                "layouts": self.layouts,
             }
         )
         return key
@@ -221,6 +303,22 @@ class PlayerButtonSettings:
                 "labels": self.labels,
                 "styles": self.styles,
                 "card_text": self.card_text,
+                "layouts": self.layouts,
+            }
+        )
+        return key
+
+    def set_layout(self, name: str, value: str) -> str:
+        key = self.resolve_layout_key(name)
+        if key is None:
+            raise ValueError("Unknown card layout. Use playing or queue.")
+        self.layouts[key] = self.validate_layout(value)
+        _save_state(
+            {
+                "labels": self.labels,
+                "styles": self.styles,
+                "card_text": self.card_text,
+                "layouts": self.layouts,
             }
         )
         return key
@@ -229,11 +327,15 @@ class PlayerButtonSettings:
         self.labels = dict(DEFAULT_LABELS)
         self.styles = dict(DEFAULT_STYLES)
         self.card_text = dict(DEFAULT_CARD_TEXT)
+        self.layouts = {
+            key: list(value) for key, value in DEFAULT_CARD_LAYOUTS.items()
+        }
         _save_state(
             {
                 "labels": self.labels,
                 "styles": self.styles,
                 "card_text": self.card_text,
+                "layouts": self.layouts,
             }
         )
 
