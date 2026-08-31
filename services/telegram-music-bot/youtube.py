@@ -620,6 +620,7 @@ async def get_related_track(
     last_url: str,
     played_ids: frozenset[str] = frozenset(),
     seed_urls: list[str] | tuple[str, ...] | None = None,
+    video: bool = False,
 ) -> dict | None:
     """Return a ready-to-stream track dict for the next autoplay song.
 
@@ -627,7 +628,9 @@ async def get_related_track(
     Candidates are ranked by how often and how highly they appear across those
     mixes. ``played_ids`` is the active session's strict no-repeat set; no
     fallback bypasses it.
-    Stream-URL path — transitions are near-instant.
+    Stream-URL path — transitions are near-instant. When ``video`` is true,
+    resolve the recommendation into separate video and audio streams so it can
+    continue a /vplay session in video mode.
     """
     seed_urls = seed_urls or [last_url]
     seed_ids: list[str] = []
@@ -689,8 +692,12 @@ async def get_related_track(
         if not related_url:
             continue
         try:
-            # Use fast stream-URL path for instant autoplay transitions.
-            return await resolve_stream_url(related_url)
+            # Use the matching fast stream-URL path for instant transitions.
+            return await (
+                resolve_video_stream_url(related_url)
+                if video
+                else resolve_stream_url(related_url)
+            )
         except (TrackNotFound, TrackTooLong):
             log.debug("Skipping unusable autoplay recommendation %s", entry.get("id"))
         except Exception:
