@@ -65,6 +65,7 @@ def player_button_editor_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("✏️ Fav", callback_data="pbtn:edit:fav"),
+                InlineKeyboardButton("✏️ Play now", callback_data="pbtn:edit:play_now"),
             ],
             [
                 InlineKeyboardButton("🎨 Style help", callback_data="pbtn:stylehelp"),
@@ -99,12 +100,60 @@ def player_card_editor_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("✏️ Separator", callback_data="pbtn:editcard:separator"),
+                InlineKeyboardButton("📐 Playing layout", callback_data="pbtn:layout:playing"),
+            ],
+            [
+                InlineKeyboardButton("📐 Queue layout", callback_data="pbtn:layout:queue"),
             ],
             [
                 InlineKeyboardButton("↩️ Back to buttons", callback_data="pbtn:back"),
             ],
         ]
     )
+
+
+def queue_card_controls(track_key: str) -> InlineKeyboardMarkup:
+    """Fallback keyboard for a queued-track request card."""
+    settings = get_player_button_settings()
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                settings.label("play_now"),
+                callback_data=f"q:play:{track_key}",
+            ),
+            InlineKeyboardButton(
+                settings.label("fav"),
+                callback_data=f"q:fav:{track_key}",
+            ),
+        ]]
+    )
+
+
+def queue_card_controls_api(track_key: str) -> dict:
+    """Bot API keyboard for queued cards, including styled action buttons."""
+    settings = get_player_button_settings()
+
+    def button(text: str, style: str, callback_data: str) -> dict:
+        return {
+            "text": text,
+            "style": style,
+            "callback_data": callback_data,
+        }
+
+    return {
+        "inline_keyboard": [[
+            button(
+                settings.label("play_now"),
+                settings.style("play_now"),
+                f"q:play:{track_key}",
+            ),
+            button(
+                settings.label("fav"),
+                settings.style("fav"),
+                f"q:fav:{track_key}",
+            ),
+        ]]
+    }
 
 
 _FALLBACK_URL = "https://youtube.com"

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import hashlib
 import html
 import logging
 
@@ -22,6 +23,8 @@ from keyboards import (
     player_controls,
     player_controls_api,
     player_button_editor_menu,
+    queue_card_controls,
+    queue_card_controls_api,
     welcome_menu,
 )
 from player import VoiceChatPlayer
@@ -76,26 +79,35 @@ def _format_track(track: Track, position: int | None = None) -> str:
     duration = _format_duration(track.duration)
     title = html.escape(track.title)
     requester = html.escape(track.requested_by)
-    divider = html.escape(settings.card("divider"))
-    song_prefix = html.escape(settings.card("song_prefix"))
-    time_prefix = html.escape(settings.card("time_prefix"))
-    requester_prefix = html.escape(settings.card("requester_prefix"))
-    separator = html.escape(settings.card("separator"))
-    if position is None:
-        return (
-            f"<b>{html.escape(settings.card('now_playing'))}</b>\n"
-            f"{divider}\n\n"
-            f"{song_prefix} <b>{title}</b>\n\n"
-            f"{time_prefix} <code>{duration}</code>   {separator}   "
-            f"{requester_prefix} {requester}"
-        )
-    return (
-        f"<b>{html.escape(settings.card('queued'))}</b>  <code>#{position}</code>\n"
-        f"{divider}\n\n"
-        f"{song_prefix} <b>{title}</b>\n\n"
-        f"{time_prefix} <code>{duration}</code>   {separator}   "
-        f"{requester_prefix} {requester}"
-    )
+    heading_key = "now_playing" if position is None else "queued"
+    heading = f"<b>{html.escape(settings.card(heading_key))}</b>"
+    if position is not None:
+        heading += f"  <code>#{position}</code>"
+
+    rendered = {
+        "heading": heading,
+        "divider": html.escape(settings.card("divider")),
+        "song": f"{html.escape(settings.card('song_prefix'))} <b>{title}</b>",
+        "time": f"{html.escape(settings.card('time_prefix'))} <code>{duration}</code>",
+        "requester": f"{html.escape(settings.card('requester_prefix'))} {requester}",
+        "meta": (
+            f"{html.escape(settings.card('time_prefix'))} <code>{duration}</code>"
+            f"   {html.escape(settings.card('separator'))}   "
+            f"{html.escape(settings.card('requester_prefix'))} {requester}"
+        ),
+        "spacer": "",
+    }
+    return "\n".join(rendered[item] for item in settings.layout(
+        "playing" if position is None else "queue"
+    ))
+
+
+def _track_callback_key(track: Track) -> str:
+    """Return a compact stable key that fits Telegram callback data limits."""
+    video_id = _extract_video_id(track.url)
+    if video_id:
+        return video_id
+    return hashlib.sha1(track.url.encode("utf-8")).hexdigest()[:16]
 
 
 async def _is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -267,6 +279,70 @@ def register_handlers(
                     autoplay_enabled=autoplayer.is_enabled(chat_id),
                 )
             )
+
+    async def _send_queued_card(
+        chat_id: int,
+        track: Track,
+        text: str,
+        photo: str | None = None,
+    ):
+        """Send a queued request card with Play Now and Fav actions."""
+        track_key = _track_callback_key(track)
+        styled_markup = queue_card_controls_api(track_key)
+        fallback_markup = queue_card_controls(track_key)
+        sent = None
+        photo = photo or track.thumbnail
+
+        if photo:
+            with contextlib.suppress(Exception):
+                sent = await bot_api.send_photo(
+                    chat_id,
+                    photo,
+                    text,
+                    reply_markup=styled_markup,
+                )
+            if sent is None:
+                with contextlib.suppress(Exception):
+                    sent = await bot.send_photo(
+                        chat_id,
+                        photo,
+                        caption=text,
+                        reply_markup=fallback_markup,
+                        parse_mode=enums.ParseMode.HTML,
+                    )
+
+        if sent is None:
+            with contextlib.suppress(Exception):
+                sent = await bot_api.send_message(
+                    chat_id,
+                    text,
+                    reply_markup=styled_markup,
+                )
+        if sent is None:
+            sent = await bot.send_message(
+                chat_id,
+                text,
+                reply_markup=fallback_markup,
+                parse_mode=enums.ParseMode.HTML,
+            )
+        return sent
+
+    async def _toggle_favorite_for_track(user_id: int, track: Track) -> bool:
+        """Toggle a track while never persisting a temporary local thumbnail."""
+        video_id = _extract_video_id(track.url) or track.url.strip()
+        thumbnail = (
+            track.thumbnail
+            if track.thumbnail and track.thumbnail.startswith("http")
+            else None
+        )
+        return await favorites.toggle(
+            user_id,
+            video_id=video_id,
+            url=track.url,
+            title=track.title,
+            duration=track.duration,
+            thumbnail=thumbnail,
+        )
 
     async def _post_now_playing(chat_id: int, track: Track) -> None:
         """Sends a fresh "now playing" message and starts its live progress
@@ -648,11 +724,9 @@ def register_handlers(
                     )
                     local_thumbnail = None
                 if local_thumbnail:
-                    track.thumbnail = local_thumbnail
-                if track.thumbnail:
-                    await message.reply_photo(track.thumbnail, caption=text, parse_mode=enums.ParseMode.HTML)
+                    await _send_queued_card(chat_id, track, text, photo=local_thumbnail)
                 else:
-                    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+                    await _send_queued_card(chat_id, track, text)
             # position == 0: on_track_start already posted the "Now playing" card.
 
     @bot.on_message(filters.command("play") & filters.group)
@@ -845,11 +919,7 @@ def register_handlers(
             )
             position = await player.play_or_enqueue(chat_id, track)
             if position > 0:
-                await bot.send_message(
-                    chat_id,
-                    _format_track(track, position),
-                    parse_mode=enums.ParseMode.HTML,
-                )
+                await _send_queued_card(chat_id, track, _format_track(track, position))
 
     @bot.on_message(filters.command("autoplay") & filters.group)
     async def autoplay_cmd(_client: Client, message: Message) -> None:
@@ -909,6 +979,77 @@ def register_handlers(
             "The bot will leave the voice chat when the queue runs out.",
             parse_mode=enums.ParseMode.HTML,
         )
+
+    @bot.on_callback_query(filters.regex(r"^q:"))
+    async def queued_card_cb(client: Client, query: CallbackQuery) -> None:
+        """Handle actions on a queued song request card."""
+        parts = query.data.split(":", 2)
+        if len(parts) != 3 or query.message is None:
+            with contextlib.suppress(Exception):
+                await query.answer("This card is no longer active.", show_alert=True)
+            return
+
+        action, track_key = parts[1], parts[2]
+        chat_id = query.message.chat.id
+        state = queues.state(chat_id)
+        track = next(
+            (item for item in state.queue if _track_callback_key(item) == track_key),
+            None,
+        )
+        if track is None:
+            with contextlib.suppress(Exception):
+                await query.answer("That song is no longer in the queue.", show_alert=True)
+            return
+
+        if action == "fav":
+            try:
+                saved = await _toggle_favorite_for_track(query.from_user.id, track)
+            except Exception:
+                log.exception(
+                    "Failed to toggle queued favorite for user %s",
+                    query.from_user.id,
+                )
+                with contextlib.suppress(Exception):
+                    await query.answer(
+                        "Favorites database is unavailable.",
+                        show_alert=True,
+                    )
+                return
+            with contextlib.suppress(Exception):
+                await query.answer(
+                    "❤️ Added to favorites" if saved else "💔 Removed from favorites"
+                )
+            return
+
+        if action != "play":
+            with contextlib.suppress(Exception):
+                await query.answer("Unknown queue action.", show_alert=True)
+            return
+
+        if not await _is_admin(client, chat_id, query.from_user.id):
+            with contextlib.suppress(Exception):
+                await query.answer(
+                    "🚫 Only admins can play a queued song now.",
+                    show_alert=True,
+                )
+            return
+
+        try:
+            started = await player.play_now(chat_id, track)
+        except Exception:
+            log.exception("Failed to play queued track now in chat %s", chat_id)
+            with contextlib.suppress(Exception):
+                await query.answer("Could not start that song.", show_alert=True)
+            return
+
+        if not started:
+            with contextlib.suppress(Exception):
+                await query.answer("That song is no longer in the queue.", show_alert=True)
+            return
+
+        with contextlib.suppress(Exception):
+            await query.answer("▶️ Playing now")
+            await query.message.delete()
 
     @bot.on_callback_query(filters.regex(r"^ctl:"))
     async def controls_cb(client: Client, query: CallbackQuery) -> None:
@@ -989,17 +1130,8 @@ def register_handlers(
                 return
 
             track = state.current
-            video_id = _extract_video_id(track.url) or track.url.strip()
-            thumbnail = track.thumbnail if track.thumbnail and track.thumbnail.startswith("http") else None
             try:
-                saved = await favorites.toggle(
-                    query.from_user.id,
-                    video_id=video_id,
-                    url=track.url,
-                    title=track.title,
-                    duration=track.duration,
-                    thumbnail=thumbnail,
-                )
+                saved = await _toggle_favorite_for_track(query.from_user.id, track)
             except Exception:
                 log.exception("Failed to toggle favorite for user %s", query.from_user.id)
                 with contextlib.suppress(Exception):
@@ -1057,7 +1189,8 @@ def register_handlers(
                 "",
                 "Names: <code>pause</code>, <code>resume</code>, <code>skip</code>, "
                 "<code>stop</code>, <code>queue</code>, <code>close</code>, "
-                "<code>autoplay_on</code>, <code>autoplay_off</code>, <code>fav</code>",
+                "<code>autoplay_on</code>, <code>autoplay_off</code>, <code>fav</code>, "
+                "<code>play_now</code>",
                 "",
                 "<b>Card text above the buttons:</b>",
                 "Tap <code>📝 Edit card text</code> to customize the heading, "
@@ -1092,10 +1225,20 @@ def register_handlers(
                 "<code>requester_prefix</code>, <code>divider</code>, "
                 "<code>separator</code>",
                 "",
+                "<b>Card layouts:</b>",
+                f"• Playing: <code>{html.escape(', '.join(settings.layout('playing')))}</code>",
+                f"• Queue: <code>{html.escape(', '.join(settings.layout('queue')))}</code>",
+                "Use <code>/setcardlayout &lt;playing|queue&gt; "
+                "&lt;items in order&gt;</code>",
+                "Items: <code>heading</code>, <code>divider</code>, "
+                "<code>song</code>, <code>time</code>, <code>requester</code>, "
+                "<code>meta</code>, <code>spacer</code>",
+                "",
                 "Examples:",
                 "<code>/setcard now_playing 🎶 ɴᴏᴡ ᴘʟᴀʏɪɴɢ</code>",
                 "<code>/setcard requester_prefix Requested by</code>",
                 "<code>/setcard time_prefix Duration</code>",
+                "<code>/setcardlayout playing heading,song,divider,meta</code>",
             ]
         )
         return "\n".join(lines)
@@ -1213,6 +1356,39 @@ def register_handlers(
             parse_mode=enums.ParseMode.HTML,
         )
 
+    @bot.on_message(filters.command("setcardlayout") & filters.private)
+    async def setcardlayout_cmd(_client: Client, message: Message) -> None:
+        """Owner-only command to reorder the playing or queue card."""
+        if not _is_owner(message.from_user.id):
+            await message.reply_text("🚫 This command is only for the bot owner.")
+            return
+
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text(
+                _player_card_editor_text(),
+                parse_mode=enums.ParseMode.HTML,
+                reply_markup=player_card_editor_menu(),
+            )
+            return
+
+        settings = get_player_button_settings()
+        try:
+            key = settings.set_layout(parts[1], parts[2])
+        except ValueError as exc:
+            await message.reply_text(
+                f"❌ {html.escape(str(exc))}",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        label = "Playing" if key == "playing" else "Queue"
+        await message.reply_text(
+            f"✅ <b>{label} card layout</b> updated to "
+            f"<code>{html.escape(', '.join(settings.layout(key)))}</code>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
     @bot.on_message(filters.command("resetbuttons") & filters.private)
     async def resetbuttons_cmd(_client: Client, message: Message) -> None:
         """Owner-only reset to the original player keyboard."""
@@ -1221,7 +1397,7 @@ def register_handlers(
             return
         get_player_button_settings().reset()
         await message.reply_text(
-            "♻️ Player button labels and styles have been reset to defaults.",
+            "♻️ Player buttons, card text, and card layouts have been reset to defaults.",
             reply_markup=player_button_editor_menu(),
         )
 
@@ -1324,6 +1500,27 @@ def register_handlers(
                 f"✏️ Editing <b>{html.escape(CARD_TEXT_NAMES[key])}</b>\n\n"
                 f"Send:\n<code>/setcard {key} &lt;new text&gt;</code>\n\n"
                 f"Current: <code>{html.escape(get_player_button_settings().card(key))}</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+            return
+
+        if action.startswith("layout:"):
+            key = action.split(":", 1)[1]
+            if key not in ("playing", "queue"):
+                with contextlib.suppress(Exception):
+                    await query.answer("Unknown card layout.", show_alert=True)
+                return
+            settings = get_player_button_settings()
+            label = "Playing" if key == "playing" else "Queue"
+            with contextlib.suppress(Exception):
+                await query.answer()
+            await query.message.reply_text(
+                f"📐 Editing <b>{label} card layout</b>\n\n"
+                f"Send:\n<code>/setcardlayout {key} &lt;items in order&gt;</code>\n\n"
+                "Items: <code>heading</code>, <code>divider</code>, "
+                "<code>song</code>, <code>time</code>, <code>requester</code>, "
+                "<code>meta</code>, <code>spacer</code>\n"
+                f"Current: <code>{html.escape(', '.join(settings.layout(key)))}</code>",
                 parse_mode=enums.ParseMode.HTML,
             )
 

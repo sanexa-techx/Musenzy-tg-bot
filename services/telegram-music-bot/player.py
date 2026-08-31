@@ -127,6 +127,35 @@ class VoiceChatPlayer:
         async with lock:
             return await self._play_next_locked(chat_id)
 
+    async def play_now(self, chat_id: int, target: Track) -> bool:
+        """Remove a queued track and start it immediately.
+
+        The queue position is preserved for every other track. The old stream
+        is cleaned up only after the replacement has started successfully.
+        """
+        lock = self._advance_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            state = self.queues.state(chat_id)
+            try:
+                position = state.queue.index(target)
+            except ValueError:
+                return False
+
+            state.queue.pop(position)
+            previous = state.current
+            self._cancel_prefetch(chat_id)
+            state.current = target
+            try:
+                await self._start(chat_id, target)
+            except Exception:
+                state.current = previous
+                state.queue.insert(position, target)
+                raise
+
+            if previous:
+                cleanup_file(previous.file_path)
+            return True
+
     async def _play_next_locked(self, chat_id: int) -> Track | None:
         # Save the current track before next_track() clears it — autoplay needs it.
         last_track = self.queues.state(chat_id).current
