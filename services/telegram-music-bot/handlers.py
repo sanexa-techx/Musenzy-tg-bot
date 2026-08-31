@@ -422,6 +422,7 @@ def register_handlers(
                 last_track.url,
                 played_ids=_played_ids(chat_id),
                 seed_urls=_mood_seed_urls(chat_id, last_track),
+                video=last_track.is_video,
             )
         except Exception:
             return None
@@ -435,6 +436,8 @@ def register_handlers(
             thumbnail=info["thumbnail"],
             requested_by="🔄 Autoplay",
             file_path=info["file_path"],
+            is_video=last_track.is_video,
+            audio_path=info.get("audio_path") if last_track.is_video else None,
         )
 
     async def _autoplay_next(chat_id: int, last_track: Track) -> Track | None:
@@ -452,6 +455,7 @@ def register_handlers(
                 last_track.url,
                 played_ids=_played_ids(chat_id),
                 seed_urls=_mood_seed_urls(chat_id, last_track),
+                video=last_track.is_video,
             )
         except Exception:
             info = None
@@ -477,6 +481,8 @@ def register_handlers(
             thumbnail=info["thumbnail"],
             requested_by="🔄 Autoplay",
             file_path=info["file_path"],
+            is_video=last_track.is_video,
+            audio_path=info.get("audio_path") if last_track.is_video else None,
         )
 
     player.on_track_start = _post_now_playing
