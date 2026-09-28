@@ -11,7 +11,7 @@ def _require(name: str) -> str:
     if not value:
         raise RuntimeError(
             f"Missing required environment variable: {name}. "
-            "Set it in Replit Secrets before starting the bot."
+            "Set it in the deployment environment before starting the bot."
         )
     return value
 
@@ -54,14 +54,15 @@ def _get_session() -> str | None:
 ASSISTANT_SESSION = _get_session()
 
 # Optional: restrict playback duration to protect against extremely long videos.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MAX_TRACK_SECONDS = int(os.environ.get("MAX_TRACK_SECONDS", "10800"))
-DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "services/telegram-music-bot/downloads")
+DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", os.path.join(BASE_DIR, "downloads"))
 
 # Branding shown in the private-chat welcome message.
-LOGO_PATH = os.environ.get("LOGO_PATH", "services/telegram-music-bot/assets/logo.jpg")
+LOGO_PATH = os.environ.get("LOGO_PATH", os.path.join(BASE_DIR, "assets", "logo.jpg"))
 OWNER_URL = os.environ.get("OWNER_URL", "https://t.me/NONKO_0")
 SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "https://t.me/+-uT8Owz9aKg5N2M1")
 
 # Telegram user ID of the bot owner.  Set OWNER_ID in Replit Secrets.
 # Only this user can use /broadcast and manage scheduled broadcasts.
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+OWNER_ID = int(os.environ.get("OWNER_ID") or "0")

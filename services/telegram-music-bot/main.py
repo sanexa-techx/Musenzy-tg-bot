@@ -14,6 +14,7 @@ Render deployment notes
 import asyncio
 import base64
 import contextlib
+import lzma
 import logging
 import os
 
@@ -25,9 +26,9 @@ from pytgcalls import PyTgCalls
 from autoplay import AutoplayManager
 from broadcast import BroadcastManager
 from config import API_HASH, API_ID, ASSISTANT_SESSION, BOT_TOKEN, OWNER_ID
+from favorites import FavoritesStore
 from handlers import register_handlers
 from player import VoiceChatPlayer
-from playlist_manager import PlaylistManager
 from queue_manager import QueueManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -40,15 +41,43 @@ ON_RENDER = bool(os.environ.get("RENDER"))
 # ── YouTube cookies bootstrap ─────────────────────────────────────────────────
 
 def _bootstrap_cookies() -> None:
-    """Write cookies.txt from YOUTUBE_COOKIES_B64 if the file is missing."""
+    """Refresh cookies.txt from YOUTUBE_COOKIES_B64 when configured."""
     cookies_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
-    if os.path.exists(cookies_path):
-        return
-    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
-    if not b64:
+    configured = os.environ.get("YOUTUBE_COOKIES_B64", "")
+    if not configured.strip():
         return
     try:
-        decoded = base64.b64decode(b64).decode("utf-8")
+        normalized = configured.strip()
+        if normalized.startswith("XZ1:"):
+            compressed = "".join(normalized[4:].split())
+            compressed += "=" * (-len(compressed) % 4)
+            decoded = lzma.decompress(base64.b64decode(compressed, validate=True)).decode("utf-8")
+        elif normalized.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
+            decoded = configured
+        else:
+            # Accept a protected raw Netscape export as well as base64. This makes
+            # the secret setup resilient to copy/paste mistakes without weakening
+            # validation for other input.
+            # Secret values may be copied without trailing "=" padding or with
+            # line-wrapping, so normalize both before decoding.
+            b64 = "".join(normalized.split()).strip("\"'`")
+            if "base64," in b64:
+                b64 = b64.split("base64,", 1)[1]
+            # Also accept URL-safe base64 produced by some web tools.
+            b64 = b64.replace("-", "+").replace("_", "/")
+            padded = b64 + "=" * (-len(b64) % 4)
+            try:
+                decoded = base64.b64decode(padded, validate=True).decode("utf-8")
+            except Exception:
+                # Some terminals/web forms add a harmless non-ASCII wrapper
+                # character. Retry with only the base64 alphabet, then verify
+                # the decoded payload below before writing it.
+                alphabet = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+                filtered = "".join(char for char in b64 if char in alphabet)
+                filtered_padded = filtered + "=" * (-len(filtered) % 4)
+                decoded = base64.b64decode(filtered_padded, validate=True).decode("utf-8")
+        if not decoded.lstrip("\ufeff \t\r\n").startswith("# Netscape HTTP Cookie File"):
+            raise ValueError("decoded value is not a Netscape cookies.txt export")
         with open(cookies_path, "w") as f:
             f.write(decoded)
         log.info("cookies.txt written from YOUTUBE_COOKIES_B64")
@@ -117,9 +146,10 @@ async def run() -> None:
     player     = VoiceChatPlayer(calls, queues)
     broadcaster = BroadcastManager()
     autoplayer = AutoplayManager()
-    playlist_mgr = PlaylistManager()
+    favorites  = FavoritesStore()
+    await favorites.connect()
 
-    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer, playlist_mgr)
+    register_handlers(bot, assistant, player, queues, broadcaster, autoplayer, favorites)
 
     # Start health server first so Render marks the service healthy ASAP.
     health_runner = await _start_health_server()
@@ -132,16 +162,14 @@ async def run() -> None:
     public_commands = [
         BotCommand("start",          "Show welcome message and instructions"),
         BotCommand("play",           "Play a song by name or YouTube link"),
+        BotCommand("vplay",          "Play a video in the voice chat"),
         BotCommand("skip",           "Skip the current track"),
         BotCommand("pause",          "Pause playback"),
         BotCommand("resume",         "Resume playback"),
         BotCommand("stop",           "Stop and leave the voice chat"),
         BotCommand("queue",          "Show the current queue"),
-        BotCommand("playlist",       "📋 Play a YouTube playlist or saved playlist"),
-        BotCommand("saveplaylist",   "💾 Save a playlist under a name"),
-        BotCommand("myplaylists",    "📂 List your saved playlists"),
-        BotCommand("deleteplaylist", "🗑 Delete a saved playlist"),
-        BotCommand("autoplay",       "🔄 Enable autoplay of related songs"),
+        BotCommand("favplay",        "❤️ Play a saved favorite"),
+        BotCommand("autoplay",       "🔄 Toggle related-song autoplay"),
         BotCommand("stopautoplay",   "⏹ Stop autoplay"),
     ]
     await bot.set_bot_commands(public_commands, scope=BotCommandScopeDefault())
@@ -150,6 +178,12 @@ async def run() -> None:
         owner_commands = public_commands + [
             BotCommand("broadcast", "📢 Broadcast a message to all groups"),
             BotCommand("groups",    "👥 List all groups the bot is in"),
+            BotCommand("playerbuttons", "🎛 Edit player card buttons"),
+            BotCommand("setbutton", "✏️ Set a player button label"),
+            BotCommand("setbuttonstyle", "🎨 Set a button color style"),
+            BotCommand("setcard", "📝 Set player card text"),
+            BotCommand("setcardlayout", "📐 Set player card layout"),
+            BotCommand("resetbuttons", "♻️ Reset player buttons"),
         ]
         with contextlib.suppress(Exception):
             await bot.set_bot_commands(
@@ -164,6 +198,7 @@ async def run() -> None:
         await asyncio.Event().wait()
     finally:
         await health_runner.cleanup()
+        await favorites.close()
 
 
 if __name__ == "__main__":

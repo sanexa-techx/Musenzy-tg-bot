@@ -6,7 +6,7 @@ import logging
 from typing import Awaitable, Callable, Optional
 
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioQuality, MediaStream, Update
+from pytgcalls.types import AudioQuality, MediaStream, Update, VideoQuality
 from pytgcalls.types.stream import StreamEnded
 
 from queue_manager import QueueManager, Track
@@ -92,12 +92,22 @@ class VoiceChatPlayer:
         state = self.queues.state(chat_id)
         state.paused = False
         try:
+            if track.is_video:
+                stream = MediaStream(
+                    track.file_path,
+                    audio_path=track.audio_path,
+                    audio_parameters=AudioQuality.STUDIO,
+                    video_parameters=VideoQuality.HD_720p,
+                    video_flags=MediaStream.Flags.REQUIRED,
+                )
+            else:
+                stream = MediaStream(
+                    track.file_path,
+                    audio_parameters=AudioQuality.STUDIO,
+                )
             await self.calls.play(
                 chat_id,
-                MediaStream(
-                    track.file_path,
-                    audio_parameters=AudioQuality.STUDIO,   # 96 kHz stereo input
-                ),
+                stream,
             )
         except Exception:
             log.exception("Failed to join/play voice chat for %s", chat_id)
@@ -116,6 +126,35 @@ class VoiceChatPlayer:
         lock = self._advance_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             return await self._play_next_locked(chat_id)
+
+    async def play_now(self, chat_id: int, target: Track) -> bool:
+        """Remove a queued track and start it immediately.
+
+        The queue position is preserved for every other track. The old stream
+        is cleaned up only after the replacement has started successfully.
+        """
+        lock = self._advance_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            state = self.queues.state(chat_id)
+            try:
+                position = state.queue.index(target)
+            except ValueError:
+                return False
+
+            state.queue.pop(position)
+            previous = state.current
+            self._cancel_prefetch(chat_id)
+            state.current = target
+            try:
+                await self._start(chat_id, target)
+            except Exception:
+                state.current = previous
+                state.queue.insert(position, target)
+                raise
+
+            if previous:
+                cleanup_file(previous.file_path)
+            return True
 
     async def _play_next_locked(self, chat_id: int) -> Track | None:
         # Save the current track before next_track() clears it — autoplay needs it.

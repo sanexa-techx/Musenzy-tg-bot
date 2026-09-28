@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
 import shutil
+import subprocess
 import time
 import uuid
 
 import yt_dlp
+import aiohttp
 
 from config import DOWNLOAD_DIR, MAX_TRACK_SECONDS
 
@@ -56,6 +59,12 @@ _AUDIO_FORMAT = (
     "/bestaudio"
 )
 
+_VIDEO_FORMAT = (
+    "bestvideo[height<=720]+bestaudio"
+    "/best[height<=720]"
+    "/best"
+)
+
 # ── Shared yt-dlp option blocks ───────────────────────────────────────────────
 _COMMON_OPTS: dict = {
     "noplaylist": True,
@@ -71,6 +80,14 @@ _SEARCH_OPTS: dict = {
     **_COMMON_OPTS,
     **_base_opts(),
     "format": _AUDIO_FORMAT,
+    "default_search": "ytsearch1",
+    "skip_download": True,
+}
+
+_VIDEO_SEARCH_OPTS: dict = {
+    **_COMMON_OPTS,
+    **_base_opts(),
+    "format": _VIDEO_FORMAT,
     "default_search": "ytsearch1",
     "skip_download": True,
 }
@@ -136,9 +153,9 @@ class YouTubeBlocked(Exception):
 
 # ── Sync helpers (run in thread executor) ─────────────────────────────────────
 
-def _extract_info_sync(query: str) -> dict:
+def _extract_info_sync(query: str, opts: dict | None = None) -> dict:
     try:
-        with yt_dlp.YoutubeDL(_SEARCH_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(opts or _SEARCH_OPTS) as ydl:
             info = ydl.extract_info(query, download=False)
     except yt_dlp.utils.DownloadError as exc:
         message = str(exc).lower()
@@ -223,6 +240,83 @@ async def resolve_stream_url(query: str) -> dict:
             _cache_set(key, result)
             return result
 
+        except (TrackNotFound, TrackTooLong):
+            raise
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    raise last_exc  # type: ignore[misc]
+
+
+async def resolve_video_stream_url(query: str) -> dict:
+    """Resolve a YouTube result to separate direct video and audio URLs."""
+    key = f"video:{_ck(query)}"
+    cached = _cache_get(key)
+    if cached:
+        return cached
+
+    loop = asyncio.get_running_loop()
+    last_exc: Exception | None = None
+
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(1)
+        try:
+            info = await loop.run_in_executor(
+                None,
+                _extract_info_sync,
+                query,
+                _VIDEO_SEARCH_OPTS,
+            )
+            duration = int(info.get("duration") or 0)
+            if duration and duration > MAX_TRACK_SECONDS:
+                raise TrackTooLong(
+                    f"{info.get('title')} is longer than the {MAX_TRACK_SECONDS}s limit"
+                )
+
+            requested_formats = info.get("requested_formats") or []
+            video_format = next(
+                (
+                    item
+                    for item in requested_formats
+                    if item.get("vcodec") not in (None, "none")
+                ),
+                None,
+            )
+            audio_format = next(
+                (
+                    item
+                    for item in requested_formats
+                    if item.get("acodec") not in (None, "none")
+                ),
+                None,
+            )
+
+            video_url = (video_format or {}).get("url")
+            audio_url = (audio_format or {}).get("url")
+            if not video_url and info.get("vcodec") not in (None, "none"):
+                video_url = info.get("url")
+            if not audio_url and info.get("acodec") not in (None, "none"):
+                audio_url = info.get("url")
+            if not video_url:
+                raise TrackNotFound(query)
+
+            video_page_url = (
+                info.get("webpage_url")
+                or info.get("original_url")
+                or query
+            )
+            result = {
+                "title": info.get("title") or "Unknown title",
+                "url": video_page_url,
+                "duration": duration,
+                "thumbnail": info.get("thumbnail"),
+                "file_path": video_url,
+                "audio_path": audio_url,
+            }
+            _cache_set(key, result)
+            return result
         except (TrackNotFound, TrackTooLong):
             raise
         except Exception as exc:
@@ -322,6 +416,146 @@ def _extract_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _to_jpeg(content: bytes) -> bytes | None:
+    """Return Telegram-compatible JPEG bytes for any supported image input."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-err_detect",
+                "explode",
+                "-i",
+                "pipe:0",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-q:v",
+                "3",
+                "pipe:1",
+            ],
+            input=content,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.startswith(b"\xff\xd8\xff"):
+            return result.stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _atomic_write(path: str, content: bytes) -> None:
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "wb") as output:
+            output.write(content)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+async def download_thumbnail(
+    thumbnail_url: str | None,
+    video_url: str = "",
+) -> str | None:
+    """Download a Telegram-safe thumbnail and return its local path.
+
+    Telegram's servers occasionally cannot fetch YouTube's remote thumbnail
+    URL, especially ``maxresdefault.jpg`` when that rendition is unavailable.
+    Downloading it here lets the Bot API upload the bytes directly and also
+    gives us several YouTube quality fallbacks.
+    """
+    if thumbnail_url and os.path.isfile(thumbnail_url):
+        return thumbnail_url
+
+    video_id = _extract_video_id(video_url) or _extract_video_id(thumbnail_url or "")
+    cache_key = video_id or hashlib.sha1(
+        (thumbnail_url or video_url).encode("utf-8")
+    ).hexdigest()
+    if not cache_key:
+        return None
+
+    # Bump the cache namespace so malformed files written by older versions
+    # cannot be reused after the validation/format fixes.
+    cache_path = os.path.join(DOWNLOAD_DIR, f"thumbnail-v2-{cache_key}.jpg")
+    try:
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1024:
+            with open(cache_path, "rb") as cached_file:
+                cached_content = cached_file.read(8 * 1024 * 1024)
+            cached_jpeg = await asyncio.to_thread(_to_jpeg, cached_content)
+            if cached_jpeg:
+                if not cached_content.startswith(b"\xff\xd8\xff"):
+                    await asyncio.to_thread(_atomic_write, cache_path, cached_jpeg)
+                return cache_path
+            os.remove(cache_path)
+    except OSError:
+        pass
+
+    candidates: list[str] = []
+    if thumbnail_url:
+        candidates.append(thumbnail_url)
+    if video_id:
+        for host in ("i.ytimg.com", "img.youtube.com"):
+            for quality in ("maxresdefault", "hqdefault", "sddefault", "default"):
+                candidates.append(
+                    f"https://{host}/vi/{video_id}/{quality}.jpg"
+                )
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    if not unique_candidates:
+        return None
+
+    timeout = aiohttp.ClientTimeout(total=12)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            for candidate in unique_candidates:
+                try:
+                    async with session.get(candidate) as response:
+                        if response.status != 200:
+                            continue
+                        content = await response.content.read(8 * 1024 * 1024)
+                        content_type = response.headers.get("Content-Type", "").lower()
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            try:
+                                if int(content_length) != len(content):
+                                    continue
+                            except ValueError:
+                                pass
+                        if not content or (
+                            not content_type.startswith("image/")
+                            and not content.startswith(
+                                (b"\xff\xd8\xff", b"\x89PNG", b"RIFF", b"GIF8")
+                            )
+                        ):
+                            continue
+                        jpeg = await asyncio.to_thread(_to_jpeg, content)
+                        if not jpeg:
+                            continue
+                        await asyncio.to_thread(_atomic_write, cache_path, jpeg)
+                        return cache_path
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    continue
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        pass
+
+    log.debug("Could not download thumbnail for %s", video_url or thumbnail_url)
+    return None
+
+
 def _entry_watch_url(entry: dict) -> str | None:
     """Normalize yt-dlp flat-playlist entries to a usable watch URL.
 
@@ -386,6 +620,7 @@ async def get_related_track(
     last_url: str,
     played_ids: frozenset[str] = frozenset(),
     seed_urls: list[str] | tuple[str, ...] | None = None,
+    video: bool = False,
 ) -> dict | None:
     """Return a ready-to-stream track dict for the next autoplay song.
 
@@ -393,7 +628,9 @@ async def get_related_track(
     Candidates are ranked by how often and how highly they appear across those
     mixes. ``played_ids`` is the active session's strict no-repeat set; no
     fallback bypasses it.
-    Stream-URL path — transitions are near-instant.
+    Stream-URL path — transitions are near-instant. When ``video`` is true,
+    resolve the recommendation into separate video and audio streams so it can
+    continue a /vplay session in video mode.
     """
     seed_urls = seed_urls or [last_url]
     seed_ids: list[str] = []
@@ -455,8 +692,12 @@ async def get_related_track(
         if not related_url:
             continue
         try:
-            # Use fast stream-URL path for instant autoplay transitions.
-            return await resolve_stream_url(related_url)
+            # Use the matching fast stream-URL path for instant transitions.
+            return await (
+                resolve_video_stream_url(related_url)
+                if video
+                else resolve_stream_url(related_url)
+            )
         except (TrackNotFound, TrackTooLong):
             log.debug("Skipping unusable autoplay recommendation %s", entry.get("id"))
         except Exception:

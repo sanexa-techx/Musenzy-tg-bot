@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # ffmpeg  — audio processing / re-encoding for py-tgcalls
 # curl    — needed for bun installer
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg curl unzip && \
+    apt-get install -y --no-install-recommends ca-certificates ffmpeg curl unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Bun (JS runtime for yt-dlp EJS n-challenge solving) ──────────────────────
@@ -24,4 +24,4 @@ RUN mkdir -p downloads .session_tmp
 
 EXPOSE 8000
 
-CMD ["python", "main.py"]
+CMD ["sh", "-c", "python migrate.py && exec python main.py"]

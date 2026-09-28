@@ -61,3 +61,7 @@ services/telegram-music-bot/downloads/
 
 # Local YouTube auth cookies (never commit real credentials)
 services/telegram-music-bot/cookies.txt
+attached_assets/cookies_*.txt
+
+# Temporary Telegram assistant/session exports (never commit credentials)
+services/telegram-music-bot/.session_tmp/

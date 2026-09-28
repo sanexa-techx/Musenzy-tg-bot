@@ -5,7 +5,7 @@ services:
     dockerfilePath: services/telegram-music-bot/Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    autoDeploy: false
+    autoDeploy: true
 
     envVars:
       - key: PORT
@@ -19,6 +19,8 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_SESSION_STRING
+        sync: false
+      - key: DATABASE_URL
         sync: false
 
       # ── YouTube cookies (base64-encoded Netscape cookies.txt) ─────────────────

@@ -7,6 +7,8 @@ Callback queries continue to be handled by the existing Pyrofork client.
 """
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 import aiohttp
@@ -91,17 +93,43 @@ class BotApiClient:
         reply_markup: dict[str, Any] | None = None,
         parse_mode: str = "HTML",
     ) -> BotApiMessage:
-        result = await self.call(
-            "sendPhoto",
-            {
-                "chat_id": chat_id,
-                "photo": photo,
-                "caption": caption,
-                "parse_mode": parse_mode,
-                **({"reply_markup": reply_markup} if reply_markup else {}),
-            },
-        )
+        if os.path.isfile(photo):
+            form = aiohttp.FormData()
+            form.add_field("chat_id", str(chat_id))
+            form.add_field("caption", caption)
+            form.add_field("parse_mode", parse_mode)
+            if reply_markup:
+                form.add_field("reply_markup", json.dumps(reply_markup))
+            with open(photo, "rb") as photo_file:
+                form.add_field(
+                    "photo",
+                    photo_file,
+                    filename=os.path.basename(photo),
+                    content_type="image/jpeg",
+                )
+                result = await self._call_multipart("sendPhoto", form)
+        else:
+            result = await self.call(
+                "sendPhoto",
+                {
+                    "chat_id": chat_id,
+                    "photo": photo,
+                    "caption": caption,
+                    "parse_mode": parse_mode,
+                    **({"reply_markup": reply_markup} if reply_markup else {}),
+                },
+            )
         return BotApiMessage(self, chat_id, int(result["message_id"]))
+
+    async def _call_multipart(self, method: str, form: aiohttp.FormData) -> Any:
+        session = await self._get_session()
+        async with session.post(f"{self._base_url}/{method}", data=form) as response:
+            data = await response.json(content_type=None)
+        if not data.get("ok"):
+            raise BotApiError(
+                f"{method} failed: {data.get('description', 'unknown Telegram error')}"
+            )
+        return data.get("result")
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
