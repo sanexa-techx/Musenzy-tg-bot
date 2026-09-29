@@ -38,7 +38,7 @@ from queue_manager import QueueManager, Track
 from youtube import (
     TrackNotFound, TrackTooLong, YouTubeBlocked,
     download_thumbnail, get_related_track,
-    resolve_and_download, resolve_video_stream_url,
+    resolve_and_download, resolve_stream_url, resolve_video_stream_url,
     _extract_video_id,
 )
 
@@ -79,7 +79,12 @@ def _format_track(track: Track, position: int | None = None) -> str:
     settings = get_player_button_settings()
     duration = _format_duration(track.duration)
     title = html.escape(track.title)
-    requester = html.escape(track.requested_by)
+    requester_name = html.escape(track.requested_by or "someone")
+    requester = (
+        f'<a href="tg://user?id={track.requester_id}">{requester_name}</a>'
+        if track.requester_id
+        else requester_name
+    )
     heading_key = "now_playing" if position is None else "queued"
     heading = f"<b>{html.escape(settings.card(heading_key))}</b>"
     if position is not None:
@@ -562,10 +567,23 @@ def register_handlers(
             audio_path=info.get("audio_path") if last_track.is_video else None,
         )
 
+    async def _recover_stream(_chat_id: int, track: Track) -> bool:
+        """Refresh an expiring direct URL after an unexpected early stop."""
+        info = await (
+            resolve_video_stream_url(track.url, fresh=True)
+            if track.is_video
+            else resolve_stream_url(track.url, fresh=True)
+        )
+        track.stream_url = info["url"]
+        track.file_path = info["file_path"]
+        track.audio_path = info.get("audio_path") if track.is_video else None
+        return True
+
     player.on_track_start = _post_now_playing
     player.on_queue_empty = _post_queue_empty
     player.on_autoplay_next = _autoplay_next
     player.on_autoplay_prefetch = _silent_autoplay_fetch
+    player.on_stream_recovery = _recover_stream
 
     @bot.on_message(filters.command("start") & filters.private)
     async def start_cmd(_client: Client, message: Message) -> None:
@@ -648,11 +666,10 @@ def register_handlers(
                     # combines them into a video voice-chat stream.
                     info = await resolve_video_stream_url(query[1])
                 else:
-                    # Download audio locally before joining the voice chat.
-                    # Direct YouTube URLs can expire or reject ffmpeg while
-                    # py-tgcalls is already connected, which leaves a silent
-                    # voice chat on cloud hosts.
-                    info = await resolve_and_download(query[1])
+                    # Resolve only first so normal playback starts quickly.
+                    # If the direct stream is rejected, the playback block
+                    # below retries once with a local ffmpeg download.
+                    info = await resolve_stream_url(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:
@@ -698,9 +715,11 @@ def register_handlers(
 
             user = message.from_user
             if user:
-                requester = f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+                requester = user.first_name or "User"
+                requester_id = user.id
             else:
                 requester = "someone"
+                requester_id = None
             track = Track(
                 title=info["title"],
                 url=info["url"],
@@ -711,21 +730,48 @@ def register_handlers(
                 file_path=info["file_path"],
                 is_video=video,
                 audio_path=info.get("audio_path") if video else None,
+                requester_id=requester_id,
             )
 
             try:
                 position = await player.play_or_enqueue(message.chat.id, track)
             except Exception:
-                log.exception("Failed to start playback for chat %s", chat_id)
-                asyncio.create_task(
-                    _send_and_delete(
-                        chat_id,
-                        bot,
-                        "❌ The assistant joined, but playback could not start. "
-                        "Please make sure the group voice chat is active and try /play again.",
+                if video:
+                    log.exception("Failed to start video playback for chat %s", chat_id)
+                    asyncio.create_task(
+                        _send_and_delete(
+                            chat_id,
+                            bot,
+                            "❌ The assistant joined, but video playback could not start. "
+                            "Please make sure the group voice chat is active and try /vplay again.",
+                        )
                     )
+                    return
+
+                # Direct URL playback is fast but can be rejected by YouTube
+                # or ffmpeg on a cloud host. Retry once with a local file
+                # rather than making the user search again.
+                log.warning(
+                    "Direct audio playback failed for chat %s; retrying with local download",
+                    chat_id,
+                    exc_info=True,
                 )
-                return
+                try:
+                    fallback = await resolve_and_download(track.url)
+                    track.stream_url = fallback["url"]
+                    track.file_path = fallback["file_path"]
+                    position = await player.play_or_enqueue(message.chat.id, track)
+                except Exception:
+                    log.exception("Local audio playback fallback failed for chat %s", chat_id)
+                    asyncio.create_task(
+                        _send_and_delete(
+                            chat_id,
+                            bot,
+                            "❌ The assistant joined, but playback could not start. "
+                            "Please make sure the group voice chat is active and try /play again.",
+                        )
+                    )
+                    return
             if position > 0:
                 # Queued — on_track_start won't fire yet, so post the queued message here.
                 text = _format_track(track, position)
@@ -903,10 +949,11 @@ def register_handlers(
             skipped: list[str] = []
             user = message.from_user
             requester = (
-                f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
+                user.first_name or "User"
                 if user
                 else "someone"
             )
+            requester_id = user.id if user else None
             try:
                 for favorite in favorites_to_play:
                     try:
@@ -931,6 +978,7 @@ def register_handlers(
                         thumbnail=info["thumbnail"],
                         requested_by=requester,
                         file_path=info["file_path"],
+                        requester_id=requester_id,
                     )
                     position = await player.play_or_enqueue(chat_id, track)
                     queued_count += 1

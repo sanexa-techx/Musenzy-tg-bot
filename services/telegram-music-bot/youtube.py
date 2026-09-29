@@ -200,7 +200,7 @@ def _download_sync(video_url: str, out_id: str) -> str:
 
 # ── Public async API ──────────────────────────────────────────────────────────
 
-async def resolve_stream_url(query: str) -> dict:
+async def resolve_stream_url(query: str, *, fresh: bool = False) -> dict:
     """Fast path: resolve a YouTube search/URL to a direct audio stream URL.
 
     Cached for 4 h — repeat requests for the same query are instant.
@@ -208,7 +208,7 @@ async def resolve_stream_url(query: str) -> dict:
     py-tgcalls feeds the URL directly to ffmpeg (no disk I/O needed).
     """
     key = _ck(query)
-    cached = _cache_get(key)
+    cached = None if fresh else _cache_get(key)
     if cached:
         return cached
 
@@ -249,10 +249,10 @@ async def resolve_stream_url(query: str) -> dict:
     raise last_exc  # type: ignore[misc]
 
 
-async def resolve_video_stream_url(query: str) -> dict:
+async def resolve_video_stream_url(query: str, *, fresh: bool = False) -> dict:
     """Resolve a YouTube result to separate direct video and audio URLs."""
     key = f"video:{_ck(query)}"
-    cached = _cache_get(key)
+    cached = None if fresh else _cache_get(key)
     if cached:
         return cached
 

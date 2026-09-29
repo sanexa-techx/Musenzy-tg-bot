@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Awaitable, Callable, Optional
 
 from pytgcalls import PyTgCalls
@@ -44,6 +45,8 @@ class VoiceChatPlayer:
         # while the current track still plays so the next autoplay track is
         # ready the moment it's needed (no gap between songs).
         self.on_autoplay_prefetch: Optional[Callable[[int, "Track"], Awaitable[Optional["Track"]]]] = None
+        # Refresh direct media URLs when ffmpeg/YouTube ends a stream early.
+        self.on_stream_recovery: Optional[Callable[[int, "Track"], Awaitable[bool]]] = None
         # Per-chat locks: py-tgcalls can fire StreamEnded more than once for
         # the same track; the lock ensures only the first event is processed.
         self._stream_end_locks: dict[int, asyncio.Lock] = {}
@@ -53,6 +56,9 @@ class VoiceChatPlayer:
         # Background prefetch state
         self._prefetch_tasks: dict[int, asyncio.Task] = {}
         self._prefetch_result: dict[int, Optional["Track"]] = {}
+        self._started_at: dict[int, float] = {}
+        self._recovery_track: dict[int, Track] = {}
+        self._recovery_attempts: dict[int, int] = {}
 
     async def _on_stream_end(self, _client: PyTgCalls, update: Update) -> None:
         if not isinstance(update, StreamEnded):
@@ -64,9 +70,29 @@ class VoiceChatPlayer:
             return
         async with lock:
             current = self.queues.state(chat_id).current
+            if current and self._ended_early(chat_id, current):
+                attempts = self._recovery_attempts.get(chat_id, 0)
+                if self.on_stream_recovery and attempts == 0:
+                    self._recovery_attempts[chat_id] = 1
+                    try:
+                        if await self.on_stream_recovery(chat_id, current):
+                            await self._start(chat_id, current, announce=False)
+                            log.warning("Recovered an early-ended stream for chat %s", chat_id)
+                            return
+                    except Exception:
+                        log.exception("Stream recovery failed for chat %s", chat_id)
             if current:
                 cleanup_file(current.file_path)
             await self.play_next(chat_id)
+
+    def _ended_early(self, chat_id: int, track: Track) -> bool:
+        """Return whether the stream ended materially before its expected end."""
+        if not track.duration:
+            return False
+        started_at = self._started_at.get(chat_id)
+        if started_at is None:
+            return False
+        return time.monotonic() - started_at + 15 < track.duration
 
     async def play_or_enqueue(self, chat_id: int, track: Track) -> int:
         position = self.queues.enqueue(chat_id, track)
@@ -102,9 +128,12 @@ class VoiceChatPlayer:
         self._prefetch_result[chat_id] = result
         self._prefetch_tasks.pop(chat_id, None)
 
-    async def _start(self, chat_id: int, track: Track) -> None:
+    async def _start(self, chat_id: int, track: Track, *, announce: bool = True) -> None:
         state = self.queues.state(chat_id)
         state.paused = False
+        if self._recovery_track.get(chat_id) is not track:
+            self._recovery_track[chat_id] = track
+            self._recovery_attempts[chat_id] = 0
         try:
             if track.is_video:
                 stream = MediaStream(
@@ -123,10 +152,11 @@ class VoiceChatPlayer:
                 chat_id,
                 stream,
             )
+            self._started_at[chat_id] = time.monotonic()
         except Exception:
             log.exception("Failed to join/play voice chat for %s", chat_id)
             raise
-        if self.on_track_start:
+        if announce and self.on_track_start:
             # Playback is already live at this point. A Telegram card or
             # progress update failure must not make the stream look failed or
             # cause the caller to roll back a track that is playing.
@@ -235,6 +265,9 @@ class VoiceChatPlayer:
 
     async def stop(self, chat_id: int) -> None:
         self._cancel_prefetch(chat_id)
+        self._started_at.pop(chat_id, None)
+        self._recovery_track.pop(chat_id, None)
+        self._recovery_attempts.pop(chat_id, None)
         current = self.queues.state(chat_id).current
         if current:
             cleanup_file(current.file_path)

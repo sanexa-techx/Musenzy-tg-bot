@@ -15,6 +15,7 @@ class Track:
     file_path: str
     is_video: bool = False
     audio_path: str | None = None
+    requester_id: int | None = None
 
 
 @dataclass
