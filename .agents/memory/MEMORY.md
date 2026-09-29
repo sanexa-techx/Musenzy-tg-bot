@@ -2,3 +2,4 @@
 - [Telegram button styles](telegram-button-styles.md) — use Bot API JSON for 9.4 styles when Pyrofork lacks the `style` field; keep a Pyrofork fallback.
 - [Telegram thumbnail delivery](telegram-thumbnail-delivery.md) — cache YouTube thumbnails locally and upload bytes when remote Telegram fetches are unreliable.
 - [Imported workspace setup](imported-workspace-setup.md) — imported monorepos may need a clean generated Python environment and a lockfile-based pnpm install before workflows start.
+- [GitHub API upload pacing](github-api-upload-pacing.md) — Git data API blob uploads through the connector are limited to about 10 requests per second; pace batches.

@@ -628,9 +628,10 @@ async def get_related_track(
     Candidates are ranked by how often and how highly they appear across those
     mixes. ``played_ids`` is the active session's strict no-repeat set; no
     fallback bypasses it.
-    Stream-URL path — transitions are near-instant. When ``video`` is true,
-    resolve the recommendation into separate video and audio streams so it can
-    continue a /vplay session in video mode.
+    Audio recommendations are downloaded locally before playback so an
+    expiring YouTube URL cannot interrupt the voice chat. When ``video`` is
+    true, resolve the recommendation into separate video and audio streams so
+    it can continue a /vplay session in video mode.
     """
     seed_urls = seed_urls or [last_url]
     seed_ids: list[str] = []
@@ -692,11 +693,13 @@ async def get_related_track(
         if not related_url:
             continue
         try:
-            # Use the matching fast stream-URL path for instant transitions.
+            # Keep video transitions on separate direct streams. Audio tracks
+            # use local files because they are more reliable across cloud
+            # network changes and ffmpeg reconnects.
             return await (
                 resolve_video_stream_url(related_url)
                 if video
-                else resolve_stream_url(related_url)
+                else resolve_and_download(related_url)
             )
         except (TrackNotFound, TrackTooLong):
             log.debug("Skipping unusable autoplay recommendation %s", entry.get("id"))

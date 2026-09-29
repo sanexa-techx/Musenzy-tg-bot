@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -70,7 +71,20 @@ class VoiceChatPlayer:
     async def play_or_enqueue(self, chat_id: int, track: Track) -> int:
         position = self.queues.enqueue(chat_id, track)
         if position == 0:
-            await self._start(chat_id, track)
+            try:
+                await self._start(chat_id, track)
+            except Exception:
+                # Do not leave a failed first track as the current track. That
+                # would make every later /play request queue behind a stream
+                # that never started.
+                state = self.queues.state(chat_id)
+                if state.current is track:
+                    state.current = None
+                    state.paused = False
+                cleanup_file(track.file_path)
+                with contextlib.suppress(Exception):
+                    await self.calls.leave_call(chat_id)
+                raise
         return position
 
     def _cancel_prefetch(self, chat_id: int) -> None:
@@ -113,7 +127,13 @@ class VoiceChatPlayer:
             log.exception("Failed to join/play voice chat for %s", chat_id)
             raise
         if self.on_track_start:
-            await self.on_track_start(chat_id, track)
+            # Playback is already live at this point. A Telegram card or
+            # progress update failure must not make the stream look failed or
+            # cause the caller to roll back a track that is playing.
+            try:
+                await self.on_track_start(chat_id, track)
+            except Exception:
+                log.exception("Track started but now-playing notification failed for %s", chat_id)
         # If the queue is now empty and autoplay prefetch is configured,
         # start silently fetching the next song while this one plays.
         if self.on_autoplay_prefetch and not self.queues.state(chat_id).queue:

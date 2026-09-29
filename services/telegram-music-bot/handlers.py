@@ -38,7 +38,7 @@ from queue_manager import QueueManager, Track
 from youtube import (
     TrackNotFound, TrackTooLong, YouTubeBlocked,
     download_thumbnail, get_related_track,
-    resolve_and_download, resolve_stream_url, resolve_video_stream_url,
+    resolve_and_download, resolve_video_stream_url,
     _extract_video_id,
 )
 
@@ -648,9 +648,11 @@ def register_handlers(
                     # combines them into a video voice-chat stream.
                     info = await resolve_video_stream_url(query[1])
                 else:
-                    # Resolve the direct audio URL instead of downloading and
-                    # re-encoding the whole track.
-                    info = await resolve_stream_url(query[1])
+                    # Download audio locally before joining the voice chat.
+                    # Direct YouTube URLs can expire or reject ffmpeg while
+                    # py-tgcalls is already connected, which leaves a silent
+                    # voice chat on cloud hosts.
+                    info = await resolve_and_download(query[1])
             except TrackTooLong as exc:
                 with contextlib.suppress(Exception):
                     if searching_msg:
@@ -711,7 +713,19 @@ def register_handlers(
                 audio_path=info.get("audio_path") if video else None,
             )
 
-            position = await player.play_or_enqueue(message.chat.id, track)
+            try:
+                position = await player.play_or_enqueue(message.chat.id, track)
+            except Exception:
+                log.exception("Failed to start playback for chat %s", chat_id)
+                asyncio.create_task(
+                    _send_and_delete(
+                        chat_id,
+                        bot,
+                        "❌ The assistant joined, but playback could not start. "
+                        "Please make sure the group voice chat is active and try /play again.",
+                    )
+                )
+                return
             if position > 0:
                 # Queued — on_track_start won't fire yet, so post the queued message here.
                 text = _format_track(track, position)
